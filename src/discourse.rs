@@ -26,7 +26,10 @@ pub struct Move {
     pub detail: String,
     #[serde(default, deserialize_with = "crate::llm::null_to_default")]
     pub new_evidence: String,
-    #[serde(default = "unknown_confidence", deserialize_with = "crate::llm::null_to_unknown")]
+    #[serde(
+        default = "unknown_confidence",
+        deserialize_with = "crate::llm::null_to_unknown"
+    )]
     pub confidence: String,
 }
 
@@ -83,7 +86,12 @@ fn findings_catalog(findings: &[Finding], resolved: &HashMap<String, Resolution>
         .join("\n")
 }
 
-fn build_round_prompt(spec: &Spec, findings: &[Finding], resolved: &HashMap<String, Resolution>, round: usize) -> String {
+fn build_round_prompt(
+    spec: &Spec,
+    findings: &[Finding],
+    resolved: &HashMap<String, Resolution>,
+    round: usize,
+) -> String {
     format!(
         "# Task\nRun round {round} of discourse. All previously sealed lens findings are now visible.\n\n\
          ## Lenses available as speakers\n{lenses}\n\n\
@@ -109,20 +117,31 @@ fn build_round_prompt(spec: &Spec, findings: &[Finding], resolved: &HashMap<Stri
     )
 }
 
-pub fn run(llm: &Llm, spec: &Spec, findings: &mut Vec<Finding>, max_rounds: usize) -> Result<(Vec<DiscourseAudit>, HashMap<String, Resolution>)> {
+pub fn run(
+    llm: &Llm,
+    spec: &Spec,
+    findings: &mut Vec<Finding>,
+    max_rounds: usize,
+) -> Result<(Vec<DiscourseAudit>, HashMap<String, Resolution>)> {
     let max_rounds = max_rounds.max(1);
     let mut resolved: HashMap<String, Resolution> = HashMap::new();
     let mut audit: Vec<DiscourseAudit> = Vec::new();
 
     for round in 1..=max_rounds {
-        let unresolved = findings.iter().any(|f| resolved.get(&f.id).map(|r| r.status == "UNCERTAIN").unwrap_or(true));
+        let unresolved = findings.iter().any(|f| {
+            resolved
+                .get(&f.id)
+                .map(|r| r.status == "UNCERTAIN")
+                .unwrap_or(true)
+        });
         if !unresolved {
             break;
         }
 
         let mut dr = run_round_call(llm, spec, findings, &resolved, round)?;
         if !dr.moves.iter().any(|m| m.kind == "CHALLENGE") {
-            dr = run_round_call(llm, spec, findings, &resolved, round).context("CHALLENGE-missing retry failed")?;
+            dr = run_round_call(llm, spec, findings, &resolved, round)
+                .context("CHALLENGE-missing retry failed")?;
         }
 
         for (i, sf) in dr.surfaced.iter_mut().enumerate() {
@@ -137,14 +156,20 @@ pub fn run(llm: &Llm, spec: &Spec, findings: &mut Vec<Finding>, max_rounds: usiz
             resolved.insert(r.finding_id.clone(), r);
         }
 
-        audit.push(DiscourseAudit { round, moves: dr.moves });
+        audit.push(DiscourseAudit {
+            round,
+            moves: dr.moves,
+        });
         if round == max_rounds {
             break;
         }
     }
 
     for f in findings.iter() {
-        let still_uncertain = resolved.get(&f.id).map(|r| r.status == "UNCERTAIN").unwrap_or(true);
+        let still_uncertain = resolved
+            .get(&f.id)
+            .map(|r| r.status == "UNCERTAIN")
+            .unwrap_or(true);
         if !still_uncertain {
             continue;
         }
@@ -159,20 +184,45 @@ pub fn run(llm: &Llm, spec: &Spec, findings: &mut Vec<Finding>, max_rounds: usiz
             })
             .sum();
         let (status, reason) = if net >= VOTE_THRESHOLD {
-            ("CONFIRMED".to_string(), format!("rounds exhausted, confidence-weighted vote confirmed (net={net:.2})"))
+            (
+                "CONFIRMED".to_string(),
+                format!("rounds exhausted, confidence-weighted vote confirmed (net={net:.2})"),
+            )
         } else if net <= -VOTE_THRESHOLD {
-            ("REJECTED".to_string(), format!("rounds exhausted, confidence-weighted vote rejected (net={net:.2})"))
+            (
+                "REJECTED".to_string(),
+                format!("rounds exhausted, confidence-weighted vote rejected (net={net:.2})"),
+            )
         } else {
-            ("UNCERTAIN".to_string(), format!("rounds exhausted, no verdict (net={net:.2}) — needs human review"))
+            (
+                "UNCERTAIN".to_string(),
+                format!("rounds exhausted, no verdict (net={net:.2}) — needs human review"),
+            )
         };
-        resolved.insert(f.id.clone(), Resolution { finding_id: f.id.clone(), status, merged_into: String::new(), reason });
+        resolved.insert(
+            f.id.clone(),
+            Resolution {
+                finding_id: f.id.clone(),
+                status,
+                merged_into: String::new(),
+                reason,
+            },
+        );
     }
 
     Ok((audit, resolved))
 }
 
-fn run_round_call(llm: &Llm, spec: &Spec, findings: &[Finding], resolved: &HashMap<String, Resolution>, round: usize) -> Result<DiscourseRound> {
+fn run_round_call(
+    llm: &Llm,
+    spec: &Spec,
+    findings: &[Finding],
+    resolved: &HashMap<String, Resolution>,
+    round: usize,
+) -> Result<DiscourseRound> {
     let prompt = build_round_prompt(spec, findings, resolved, round);
-    let v = llm.json(&prompt, Some(DISCOURSE_SYSTEM)).with_context(|| format!("discourse round {round} failed"))?;
+    let v = llm
+        .json(&prompt, Some(DISCOURSE_SYSTEM))
+        .with_context(|| format!("discourse round {round} failed"))?;
     serde_json::from_value(v).with_context(|| format!("discourse round {round} schema mismatch"))
 }

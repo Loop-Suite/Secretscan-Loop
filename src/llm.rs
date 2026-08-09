@@ -29,10 +29,19 @@ pub struct Usage {
 
 impl Usage {
     pub fn summary(&self) -> String {
-        let cost = if self.cost_usd > 0.0 { format!(", cost ${:.4}", self.cost_usd) } else { String::new() };
+        let cost = if self.cost_usd > 0.0 {
+            format!(", cost ${:.4}", self.cost_usd)
+        } else {
+            String::new()
+        };
         format!(
             "LLM calls: {} — input {} / output {} / cache_read {} / cache_write {}{}",
-            self.calls, self.input_tokens, self.output_tokens, self.cache_read_tokens, self.cache_creation_tokens, cost
+            self.calls,
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_tokens,
+            self.cache_creation_tokens,
+            cost
         )
     }
 }
@@ -66,12 +75,29 @@ impl Llm {
         Arc::new(Mutex::new(Usage::default()))
     }
 
-    pub fn claude_cli(bin: String, model: Option<String>, retries: u32, verbose: bool, usage: Arc<Mutex<Usage>>) -> Self {
-        Llm { provider: Provider::ClaudeCli { bin }, model, retries, verbose, usage }
+    pub fn claude_cli(
+        bin: String,
+        model: Option<String>,
+        retries: u32,
+        verbose: bool,
+        usage: Arc<Mutex<Usage>>,
+    ) -> Self {
+        Llm {
+            provider: Provider::ClaudeCli { bin },
+            model,
+            retries,
+            verbose,
+            usage,
+        }
     }
 
     /// Requires the `OPENROUTER_API_KEY` env var. Defaults to the 120B open model if model is unspecified.
-    pub fn openrouter(model: Option<String>, retries: u32, verbose: bool, usage: Arc<Mutex<Usage>>) -> Result<Self> {
+    pub fn openrouter(
+        model: Option<String>,
+        retries: u32,
+        verbose: bool,
+        usage: Arc<Mutex<Usage>>,
+    ) -> Result<Self> {
         let api_key = std::env::var("OPENROUTER_API_KEY")
             .context("OPENROUTER_API_KEY env var not set (export OPENROUTER_API_KEY=...)")?;
         Ok(Llm {
@@ -102,7 +128,9 @@ impl Llm {
 
     fn call_once(&self, ctx: Option<&str>, task: &str, system: Option<&str>) -> Result<CallResult> {
         match &self.provider {
-            Provider::ClaudeCli { bin } => call_claude(bin, self.model.as_deref(), ctx, task, system),
+            Provider::ClaudeCli { bin } => {
+                call_claude(bin, self.model.as_deref(), ctx, task, system)
+            }
             Provider::OpenRouter { api_key } => {
                 call_openrouter(api_key, self.model.as_deref(), ctx, task, system)
             }
@@ -130,7 +158,11 @@ impl Llm {
             if self.verbose {
                 match last.as_ref() {
                     Some(error) => eprintln!("[retry {}/{}] {error}", attempt + 1, self.retries),
-                    None => eprintln!("[retry {}/{}] unknown retry error", attempt + 1, self.retries),
+                    None => eprintln!(
+                        "[retry {}/{}] unknown retry error",
+                        attempt + 1,
+                        self.retries
+                    ),
                 }
             }
         }
@@ -143,7 +175,12 @@ impl Llm {
     }
 
     /// JSON-forcing variant of [`Llm::text_ctx`].
-    pub fn json_ctx(&self, ctx: Option<&str>, task: &str, system: Option<&str>) -> Result<serde_json::Value> {
+    pub fn json_ctx(
+        &self,
+        ctx: Option<&str>,
+        task: &str,
+        system: Option<&str>,
+    ) -> Result<serde_json::Value> {
         let mut last: Option<anyhow::Error> = None;
         for attempt in 0..=self.retries {
             let raw = match self.call_once(ctx, task, system) {
@@ -155,9 +192,15 @@ impl Llm {
                     last = Some(e);
                     if self.verbose {
                         match last.as_ref() {
-                            Some(error) => eprintln!("[json retry {}/{}] {error}", attempt + 1, self.retries),
+                            Some(error) => {
+                                eprintln!("[json retry {}/{}] {error}", attempt + 1, self.retries)
+                            }
                             None => {
-                                eprintln!("[json retry {}/{}] unknown json retry error", attempt + 1, self.retries);
+                                eprintln!(
+                                    "[json retry {}/{}] unknown json retry error",
+                                    attempt + 1,
+                                    self.retries
+                                );
                             }
                         }
                     }
@@ -170,9 +213,15 @@ impl Llm {
                     last = Some(e);
                     if self.verbose {
                         match last.as_ref() {
-                            Some(error) => eprintln!("[json retry {}/{}] {error}", attempt + 1, self.retries),
+                            Some(error) => {
+                                eprintln!("[json retry {}/{}] {error}", attempt + 1, self.retries)
+                            }
                             None => {
-                                eprintln!("[json retry {}/{}] unknown json retry error", attempt + 1, self.retries);
+                                eprintln!(
+                                    "[json retry {}/{}] unknown json retry error",
+                                    attempt + 1,
+                                    self.retries
+                                );
                             }
                         }
                     }
@@ -186,7 +235,13 @@ impl Llm {
 /// Passes the prompt via stdin (to avoid argument length limits). Since this is a subprocess
 /// call, caching doesn't apply, so ctx+task are simply concatenated (order only: stable context
 /// first, variable instructions last).
-fn call_claude(bin: &str, model: Option<&str>, ctx: Option<&str>, task: &str, system: Option<&str>) -> Result<CallResult> {
+fn call_claude(
+    bin: &str,
+    model: Option<&str>,
+    ctx: Option<&str>,
+    task: &str,
+    system: Option<&str>,
+) -> Result<CallResult> {
     let mut cmd = Command::new(bin);
     cmd.arg("-p").arg("--output-format").arg("json");
     if let Some(m) = model {
@@ -195,13 +250,18 @@ fn call_claude(bin: &str, model: Option<&str>, ctx: Option<&str>, task: &str, sy
     if let Some(s) = system {
         cmd.arg("--append-system-prompt").arg(s);
     }
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to run `{bin}` (check install and PATH)"))?;
     {
-        let stdin = child.stdin.as_mut().ok_or_else(|| anyhow!("failed to open stdin"))?;
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("failed to open stdin"))?;
         if let Some(c) = ctx {
             stdin.write_all(c.as_bytes())?;
         }
@@ -218,10 +278,17 @@ fn call_claude(bin: &str, model: Option<&str>, ctx: Option<&str>, task: &str, sy
         ));
     }
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let v: serde_json::Value = serde_json::from_str(stdout.trim())
-        .with_context(|| format!("failed to parse claude JSON output: {}", truncate(&stdout, 400)))?;
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).with_context(|| {
+        format!(
+            "failed to parse claude JSON output: {}",
+            truncate(&stdout, 400)
+        )
+    })?;
     if v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false) {
-        return Err(anyhow!("claude returned an error response: {}", truncate(&stdout, 400)));
+        return Err(anyhow!(
+            "claude returned an error response: {}",
+            truncate(&stdout, 400)
+        ));
     }
     let result = v
         .get("result")
@@ -232,7 +299,12 @@ fn call_claude(bin: &str, model: Option<&str>, ctx: Option<&str>, task: &str, sy
     // CLI version, so parse them leniently (default to 0 rather than failing — only the result
     // field is treated as the contract).
     let usage_obj = v.get("usage");
-    let get_u64 = |key: &str| usage_obj.and_then(|u| u.get(key)).and_then(|x| x.as_u64()).unwrap_or(0);
+    let get_u64 = |key: &str| {
+        usage_obj
+            .and_then(|u| u.get(key))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0)
+    };
     let cost_usd = v
         .get("total_cost_usd")
         .or_else(|| v.get("cost_usd"))
@@ -262,7 +334,13 @@ fn supports_prompt_caching(model: &str) -> bool {
 /// Claude-family, split it into a separate content block and attach cache_control(ephemeral) —
 /// an optimization aiming for cache hits when the same ctx is reused across repeated calls
 /// (e.g. per-lens review). Otherwise, send a plain single-string content as before.
-fn call_openrouter(api_key: &str, model: Option<&str>, ctx: Option<&str>, task: &str, system: Option<&str>) -> Result<CallResult> {
+fn call_openrouter(
+    api_key: &str,
+    model: Option<&str>,
+    ctx: Option<&str>,
+    task: &str,
+    system: Option<&str>,
+) -> Result<CallResult> {
     let mut messages: Vec<serde_json::Value> = Vec::new();
     if let Some(s) = system {
         messages.push(serde_json::json!({"role": "system", "content": s}));
@@ -298,7 +376,10 @@ fn call_openrouter(api_key: &str, model: Option<&str>, ctx: Option<&str>, task: 
         Ok(r) => r,
         Err(ureq::Error::Status(code, r)) => {
             let body = r.into_string().unwrap_or_default();
-            return Err(anyhow!("openrouter response code {code}: {}", truncate(&body, 400)));
+            return Err(anyhow!(
+                "openrouter response code {code}: {}",
+                truncate(&body, 400)
+            ));
         }
         Err(e) => return Err(anyhow!("openrouter call failed: {e}")),
     };
@@ -312,12 +393,22 @@ fn call_openrouter(api_key: &str, model: Option<&str>, ctx: Option<&str>, task: 
         .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
-        .ok_or_else(|| anyhow!("openrouter response has no content: {}", truncate(&v.to_string(), 400)))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "openrouter response has no content: {}",
+                truncate(&v.to_string(), 400)
+            )
+        })?;
 
     // OpenAI-compatible usage schema (prompt_tokens/completion_tokens). cost isn't in the
     // response, so it's left at 0.
     let usage_obj = v.get("usage");
-    let get_u64 = |key: &str| usage_obj.and_then(|u| u.get(key)).and_then(|x| x.as_u64()).unwrap_or(0);
+    let get_u64 = |key: &str| {
+        usage_obj
+            .and_then(|u| u.get(key))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0)
+    };
     Ok(CallResult {
         text: content.to_string(),
         usage: CallUsage {

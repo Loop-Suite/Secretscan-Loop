@@ -57,7 +57,11 @@ fn exit_code_for(verdict: &str, fail_on: &FailOn) -> i32 {
         FailOn::Warn => verdict == "WARN" || verdict == "BLOCK",
         FailOn::Block => verdict == "BLOCK",
     };
-    if should_fail { verdict_code(verdict) } else { 0 }
+    if should_fail {
+        verdict_code(verdict)
+    } else {
+        0
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -174,8 +178,20 @@ fn build_llm(cli: &Cli) -> Result<(Llm, Llm)> {
     let cheap_model = cli.cheap_model.clone().or_else(|| cli.model.clone());
     let (main_llm, cheap_llm) = match cli.backend {
         Backend::Claude => (
-            Llm::claude_cli(cli.claude_bin.clone(), cli.model.clone(), cli.retries, cli.verbose, usage.clone()),
-            Llm::claude_cli(cli.claude_bin.clone(), cheap_model, cli.retries, cli.verbose, usage.clone()),
+            Llm::claude_cli(
+                cli.claude_bin.clone(),
+                cli.model.clone(),
+                cli.retries,
+                cli.verbose,
+                usage.clone(),
+            ),
+            Llm::claude_cli(
+                cli.claude_bin.clone(),
+                cheap_model,
+                cli.retries,
+                cli.verbose,
+                usage.clone(),
+            ),
         ),
         Backend::Openrouter => (
             Llm::openrouter(cli.model.clone(), cli.retries, cli.verbose, usage.clone())?,
@@ -190,19 +206,60 @@ fn real_main() -> Result<i32> {
     let (llm, cheap_llm) = build_llm(&cli)?;
 
     match &cli.cmd {
-        Cmd::Scan { spec, target, notes, lenses, out, concurrency, max_rounds, prior, staged, range, history } => {
+        Cmd::Scan {
+            spec,
+            target,
+            notes,
+            lenses,
+            out,
+            concurrency,
+            max_rounds,
+            prior,
+            staged,
+            range,
+            history,
+        } => {
             let scope = scan_scope_from_flags(*staged, range, *history)?;
-            run_scan(&llm, &cheap_llm, spec, target, notes, lenses, out, *concurrency, *max_rounds, prior, &scope, &cli.fail_on)
+            run_scan(
+                &llm,
+                &cheap_llm,
+                spec,
+                target,
+                notes,
+                lenses,
+                out,
+                *concurrency,
+                *max_rounds,
+                prior,
+                &scope,
+                &cli.fail_on,
+            )
         }
-        Cmd::Describe { spec, target, notes, out } => {
+        Cmd::Describe {
+            spec,
+            target,
+            notes,
+            out,
+        } => {
             run_describe(&llm, spec, target, notes, out)?;
             Ok(0)
         }
-        Cmd::Improve { spec, target, notes, out } => {
+        Cmd::Improve {
+            spec,
+            target,
+            notes,
+            out,
+        } => {
             run_improve(&llm, spec, target, notes, out)?;
             Ok(0)
         }
-        Cmd::Ask { spec, target, notes, out, question } => {
+        Cmd::Ask {
+            spec,
+            target,
+            notes,
+            out,
+            question,
+        } => {
             run_ask(&llm, spec, target, notes, out, question)?;
             Ok(0)
         }
@@ -213,7 +270,10 @@ fn real_main() -> Result<i32> {
 /// (backward-compatible default — issue #2).
 fn scan_scope_from_flags(staged: bool, range: &Option<String>, history: bool) -> Result<ScanScope> {
     let picked = staged as u8 + range.is_some() as u8 + history as u8;
-    anyhow::ensure!(picked <= 1, "--staged, --range, --history are mutually exclusive");
+    anyhow::ensure!(
+        picked <= 1,
+        "--staged, --range, --history are mutually exclusive"
+    );
     if staged {
         Ok(ScanScope::Staged)
     } else if let Some(r) = range {
@@ -252,14 +312,27 @@ fn run_scan(
 
     println!(
         "scan start (round {}) — {} ({} files scanned, {} raw candidates)",
-        round, sp.name, inp.files_scanned, inp.candidates.len()
+        round,
+        sp.name,
+        inp.files_scanned,
+        inp.candidates.len()
     );
 
-    let checks_results = checks::run_all(target, &sp.required_gitignore_patterns, inp.candidates.len());
+    let checks_results = checks::run_all(
+        target,
+        &sp.required_gitignore_patterns,
+        inp.candidates.len(),
+    );
 
     if inp.candidates.is_empty() {
         println!("no candidates found — skipping lens review and discourse");
-        let quant = quantify::summarize(&inp.candidates, &[], &Default::default(), &checks_results, 0);
+        let quant = quantify::summarize(
+            &inp.candidates,
+            &[],
+            &Default::default(),
+            &checks_results,
+            0,
+        );
         let path = report::write(report::ReportCtx {
             out_dir: &out_dir,
             spec: &sp,
@@ -276,7 +349,14 @@ fn run_scan(
             quant: &quant,
             fix_results: &[],
         })?;
-        state::write(&out_dir, &state::State { round, findings: vec![], resolved: Default::default() })?;
+        state::write(
+            &out_dir,
+            &state::State {
+                round,
+                findings: vec![],
+                resolved: Default::default(),
+            },
+        )?;
         println!("\nverdict={} score={}/100", quant.verdict, quant.score);
         println!("report: {}", path.display());
         return Ok(exit_code_for(&quant.verdict, fail_on));
@@ -284,7 +364,11 @@ fn run_scan(
 
     let optional_selected: Vec<String> = match lenses_arg {
         Some(s) => {
-            let ids: Vec<String> = s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+            let ids: Vec<String> = s
+                .split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect();
             for id in &ids {
                 anyhow::ensure!(sp.lens_by_id(id).is_some(), "lens id not in spec: {id}");
             }
@@ -300,11 +384,17 @@ fn run_scan(
     }
     println!("selected lenses: {}", selected_ids.join(", "));
 
-    let lens_outputs: Vec<(String, lens::LensOutput)> = par_map(concurrency, selected_ids.clone(), |id| {
-        let out = lens::review_lens(llm, &sp, &inp, &id)?;
-        println!("  lens done: {} — {} finding(s), {} unverified", id, out.findings.len(), out.unverified.len());
-        Ok((id, out))
-    })?;
+    let lens_outputs: Vec<(String, lens::LensOutput)> =
+        par_map(concurrency, selected_ids.clone(), |id| {
+            let out = lens::review_lens(llm, &sp, &inp, &id)?;
+            println!(
+                "  lens done: {} — {} finding(s), {} unverified",
+                id,
+                out.findings.len(),
+                out.unverified.len()
+            );
+            Ok((id, out))
+        })?;
 
     let mut findings: Vec<Finding> = Vec::new();
     let mut unverified: Vec<(String, String)> = Vec::new();
@@ -328,7 +418,12 @@ fn run_scan(
         let prior_confirmed: Vec<Finding> = ps
             .findings
             .iter()
-            .filter(|f| ps.resolved.get(&f.id).map(|r| r.status == "CONFIRMED").unwrap_or(false))
+            .filter(|f| {
+                ps.resolved
+                    .get(&f.id)
+                    .map(|r| r.status == "CONFIRMED")
+                    .unwrap_or(false)
+            })
             .cloned()
             .collect();
         fix_results = fixcheck::run(cheap_llm, &sp, &inp, &prior_confirmed)?;
@@ -342,7 +437,10 @@ fn run_scan(
                             finding_id: orig.id.clone(),
                             status: "CONFIRMED".to_string(),
                             merged_into: String::new(),
-                            reason: format!("still open per prior-round comparison: {}", fr.evidence),
+                            reason: format!(
+                                "still open per prior-round comparison: {}",
+                                fr.evidence
+                            ),
                         },
                     );
                 }
@@ -350,11 +448,20 @@ fn run_scan(
         }
     }
 
-    let confirmed_refs: Vec<&Finding> = findings.iter().filter(|f| resolved.get(&f.id).map(|r| r.status.as_str()) == Some("CONFIRMED")).collect();
+    let confirmed_refs: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| resolved.get(&f.id).map(|r| r.status.as_str()) == Some("CONFIRMED"))
+        .collect();
     let policies = requirements::verify(cheap_llm, &sp, &inp, &confirmed_refs)?;
     let policy_violations = requirements::violations(&policies);
 
-    let quant = quantify::summarize(&inp.candidates, &findings, &resolved, &checks_results, policy_violations.len());
+    let quant = quantify::summarize(
+        &inp.candidates,
+        &findings,
+        &resolved,
+        &checks_results,
+        policy_violations.len(),
+    );
 
     let path = report::write(report::ReportCtx {
         out_dir: &out_dir,
@@ -373,16 +480,32 @@ fn run_scan(
         fix_results: &fix_results,
     })?;
 
-    state::write(&out_dir, &state::State { round, findings: findings.clone(), resolved: resolved.clone() })?;
+    state::write(
+        &out_dir,
+        &state::State {
+            round,
+            findings: findings.clone(),
+            resolved: resolved.clone(),
+        },
+    )?;
 
-    println!("\ndone — verdict={} score={}/100 policy_violations={}", quant.verdict, quant.score, quant.policy_violation_count);
+    println!(
+        "\ndone — verdict={} score={}/100 policy_violations={}",
+        quant.verdict, quant.score, quant.policy_violation_count
+    );
     println!("report: {}", path.display());
     println!("next round: --prior {}", out_dir.display());
     println!("{}", llm.usage().summary());
     Ok(exit_code_for(&quant.verdict, fail_on))
 }
 
-fn run_describe(llm: &Llm, spec_path: &PathBuf, target: &PathBuf, notes_path: &Option<PathBuf>, out: &PathBuf) -> Result<()> {
+fn run_describe(
+    llm: &Llm,
+    spec_path: &PathBuf,
+    target: &PathBuf,
+    notes_path: &Option<PathBuf>,
+    out: &PathBuf,
+) -> Result<()> {
     let sp = Spec::load(spec_path)?;
     let inp = input::normalize(target, notes_path, &ScanScope::Filesystem)?;
     let out_dir = prepare_out(out)?;
@@ -393,18 +516,35 @@ fn run_describe(llm: &Llm, spec_path: &PathBuf, target: &PathBuf, notes_path: &O
     Ok(())
 }
 
-fn run_improve(llm: &Llm, spec_path: &PathBuf, target: &PathBuf, notes_path: &Option<PathBuf>, out: &PathBuf) -> Result<()> {
+fn run_improve(
+    llm: &Llm,
+    spec_path: &PathBuf,
+    target: &PathBuf,
+    notes_path: &Option<PathBuf>,
+    out: &PathBuf,
+) -> Result<()> {
     let sp = Spec::load(spec_path)?;
     let inp = input::normalize(target, notes_path, &ScanScope::Filesystem)?;
     let out_dir = prepare_out(out)?;
     let suggestions = improve::run(llm, &sp, &inp)?;
     let path = report::write_improve(&out_dir, &suggestions)?;
-    println!("improve done: {} suggestion(s) — {}", suggestions.len(), path.display());
+    println!(
+        "improve done: {} suggestion(s) — {}",
+        suggestions.len(),
+        path.display()
+    );
     println!("{}", llm.usage().summary());
     Ok(())
 }
 
-fn run_ask(llm: &Llm, spec_path: &PathBuf, target: &PathBuf, notes_path: &Option<PathBuf>, out: &PathBuf, question: &str) -> Result<()> {
+fn run_ask(
+    llm: &Llm,
+    spec_path: &PathBuf,
+    target: &PathBuf,
+    notes_path: &Option<PathBuf>,
+    out: &PathBuf,
+    question: &str,
+) -> Result<()> {
     let sp = Spec::load(spec_path)?;
     let inp = input::normalize(target, notes_path, &ScanScope::Filesystem)?;
     let out_dir = prepare_out(out)?;
@@ -412,7 +552,8 @@ fn run_ask(llm: &Llm, spec_path: &PathBuf, target: &PathBuf, notes_path: &Option
     let path = out_dir.join("ask.md");
     let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
     existing.push_str(&format!("\n## Q: {question}\n\n{answer}\n"));
-    std::fs::write(&path, existing).with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(&path, existing)
+        .with_context(|| format!("failed to write {}", path.display()))?;
     println!("{}", answer);
     println!("\n(accumulated: {})", path.display());
     println!("{}", llm.usage().summary());
@@ -420,7 +561,8 @@ fn run_ask(llm: &Llm, spec_path: &PathBuf, target: &PathBuf, notes_path: &Option
 }
 
 fn prepare_out(p: &PathBuf) -> Result<PathBuf> {
-    std::fs::create_dir_all(p).with_context(|| format!("failed to create output dir: {}", p.display()))?;
+    std::fs::create_dir_all(p)
+        .with_context(|| format!("failed to create output dir: {}", p.display()))?;
     Ok(p.clone())
 }
 
@@ -430,22 +572,26 @@ where
     R: Send,
     F: Fn(T) -> Result<R> + Sync,
 {
-        let c = concurrency.max(1);
-        let mut out: Vec<R> = Vec::new();
-        let mut rest = items;
-        while !rest.is_empty() {
-            let take = c.min(rest.len());
-            let chunk: Vec<T> = rest.drain(..take).collect();
-            let results: Vec<Result<R>> = std::thread::scope(|s| {
-                let handles: Vec<_> = chunk.into_iter().map(|item| s.spawn(|| f(item))).collect();
-                handles
-                    .into_iter()
-                    .map(|h| h.join().map_err(|_| anyhow!("worker thread panicked")).and_then(|r| r))
-                    .collect()
-            });
-            for r in results {
-                out.push(r?);
-            }
+    let c = concurrency.max(1);
+    let mut out: Vec<R> = Vec::new();
+    let mut rest = items;
+    while !rest.is_empty() {
+        let take = c.min(rest.len());
+        let chunk: Vec<T> = rest.drain(..take).collect();
+        let results: Vec<Result<R>> = std::thread::scope(|s| {
+            let handles: Vec<_> = chunk.into_iter().map(|item| s.spawn(|| f(item))).collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .map_err(|_| anyhow!("worker thread panicked"))
+                        .and_then(|r| r)
+                })
+                .collect()
+        });
+        for r in results {
+            out.push(r?);
         }
+    }
     Ok(out)
 }

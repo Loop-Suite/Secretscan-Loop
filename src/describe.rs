@@ -5,7 +5,8 @@ use crate::spec::Spec;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-pub const DESCRIBE_SYSTEM: &str = "You summarize a secret-scan run for a developer about to push or open-source a repo. \
+pub const DESCRIBE_SYSTEM: &str =
+    "You summarize a secret-scan run for a developer about to push or open-source a repo. \
 Never restate raw secret values. Respond only in the specified JSON schema.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +31,8 @@ pub fn run(llm: &Llm, spec: &Spec, input: &Input) -> Result<Describe> {
          \"labels\":[\"categories of risk found, e.g. cloud-credential, private-key\"],\
          \"safe_to_publish\":\"yes|no|unknown\",\"safe_to_publish_note\":\"why\"}\n";
     let system = format!("{DESCRIBE_SYSTEM}\n\n{UNTRUSTED_DATA_SYSTEM_NOTE}");
-    let v = llm.json_ctx(Some(&ctx), task, Some(&system)).context("describe failed")?;
+    let v = llm
+        .json_ctx(Some(&ctx), task, Some(&system))
+        .context("describe failed")?;
     serde_json::from_value(v).context("describe schema mismatch")
 }

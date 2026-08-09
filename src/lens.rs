@@ -71,8 +71,15 @@ pub fn select_lenses(llm: &Llm, spec: &Spec, input: &Input) -> Result<Vec<String
     let catalog = optional
         .iter()
         .map(|l| {
-            let who = if l.persona_name.is_empty() { l.title.clone() } else { format!("{} ({})", l.title, l.persona_name) };
-            format!("- id=\"{}\" | {} — selection signal: {}", l.id, who, l.signal)
+            let who = if l.persona_name.is_empty() {
+                l.title.clone()
+            } else {
+                format!("{} ({})", l.title, l.persona_name)
+            };
+            format!(
+                "- id=\"{}\" | {} — selection signal: {}",
+                l.id, who, l.signal
+            )
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -83,13 +90,22 @@ pub fn select_lenses(llm: &Llm, spec: &Spec, input: &Input) -> Result<Vec<String
          ## Output (JSON only)\n{{\"selected\":[\"id\", ...]}}\n"
     );
     let system = format!("You only select lenses, nothing else. Respond in JSON only.\n\n{UNTRUSTED_DATA_SYSTEM_NOTE}");
-    let v = llm.json_ctx(Some(&ctx), &task, Some(&system)).context("lens selection failed")?;
+    let v = llm
+        .json_ctx(Some(&ctx), &task, Some(&system))
+        .context("lens selection failed")?;
     let selected: Vec<String> = v
         .get("selected")
         .and_then(|s| s.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
         .unwrap_or_default();
-    let valid: Vec<String> = selected.into_iter().filter(|id| spec.lens_by_id(id).is_some()).collect();
+    let valid: Vec<String> = selected
+        .into_iter()
+        .filter(|id| spec.lens_by_id(id).is_some())
+        .collect();
     anyhow::ensure!(!valid.is_empty(), "lens selection returned nothing valid");
     Ok(valid)
 }
@@ -114,20 +130,32 @@ fn build_review_task(spec: &Spec, lens_title: &str, lens_guide: &str) -> String 
 }
 
 pub fn review_lens(llm: &Llm, spec: &Spec, input: &Input, lens_id: &str) -> Result<LensOutput> {
-    let lens = spec.lens_by_id(lens_id).ok_or_else(|| anyhow::anyhow!("lens not in spec: {lens_id}"))?;
+    let lens = spec
+        .lens_by_id(lens_id)
+        .ok_or_else(|| anyhow::anyhow!("lens not in spec: {lens_id}"))?;
     let ctx = shared_context(spec, input);
     let task = build_review_task(spec, &lens.title, &lens.guide);
     let system = persona_system(lens);
-    let v = llm.json_ctx(Some(&ctx), &task, Some(&system)).with_context(|| format!("lens review failed: {lens_id}"))?;
-    let mut out: LensOutput = serde_json::from_value(v).with_context(|| format!("lens review schema mismatch: {lens_id}"))?;
-    let reviewer = if lens.persona_name.is_empty() { lens.title.clone() } else { lens.persona_name.clone() };
+    let v = llm
+        .json_ctx(Some(&ctx), &task, Some(&system))
+        .with_context(|| format!("lens review failed: {lens_id}"))?;
+    let mut out: LensOutput = serde_json::from_value(v)
+        .with_context(|| format!("lens review schema mismatch: {lens_id}"))?;
+    let reviewer = if lens.persona_name.is_empty() {
+        lens.title.clone()
+    } else {
+        lens.persona_name.clone()
+    };
     for (i, f) in out.findings.iter_mut().enumerate() {
         f.id = format!("{}-{}", lens_id, i + 1);
         f.lens = lens_id.to_string();
         f.reviewer = reviewer.clone();
         // Never trust the LLM's own claim about verification status — derive strictly from
         // the scanner-reported Candidate it references (issue #3).
-        f.hard_verified = input.candidates.iter().any(|c| c.id == f.candidate_id && c.hard_verified);
+        f.hard_verified = input
+            .candidates
+            .iter()
+            .any(|c| c.id == f.candidate_id && c.hard_verified);
     }
     Ok(out)
 }

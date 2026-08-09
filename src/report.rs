@@ -26,7 +26,13 @@ fn checks_table(checks: &[CheckResult]) -> String {
     let mut md = String::new();
     md.push_str("| ID | Check | Status | Evidence |\n|---|---|---|---|\n");
     for c in checks {
-        md.push_str(&format!("| {} | {} | {} | {} |\n", c.id, c.title, c.status.label(), c.evidence));
+        md.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            c.id,
+            c.title,
+            c.status.label(),
+            c.evidence
+        ));
     }
     md
 }
@@ -50,22 +56,48 @@ pub struct ReportCtx<'a> {
 
 pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
     let ReportCtx {
-        out_dir, spec, input, selected_lenses, round, findings, resolved, unverified,
-        checks, policies, policy_violations, audit, quant, fix_results,
+        out_dir,
+        spec,
+        input,
+        selected_lenses,
+        round,
+        findings,
+        resolved,
+        unverified,
+        checks,
+        policies,
+        policy_violations,
+        audit,
+        quant,
+        fix_results,
     } = ctx;
 
     let mut md = String::new();
-    md.push_str(&format!("# Secret scan — {} (round {})\n\n", spec.name, round));
+    md.push_str(&format!(
+        "# Secret scan — {} (round {})\n\n",
+        spec.name, round
+    ));
     md.push_str(&format!(
         "**Verdict: {}**  ·  Score: {}/100  ·  {} files scanned · {} raw candidate(s)\n\n",
-        quant.verdict, quant.score, input.files_scanned, input.candidates.len()
+        quant.verdict,
+        quant.score,
+        input.files_scanned,
+        input.candidates.len()
     ));
-    md.push_str(&format!("Selected lenses: {}\n\n", selected_lenses.join(", ")));
+    md.push_str(&format!(
+        "Selected lenses: {}\n\n",
+        selected_lenses.join(", ")
+    ));
 
     if !fix_results.is_empty() {
-        md.push_str("## Compared to prior round\n\n| Finding | Status | Evidence |\n|---|---|---|\n");
+        md.push_str(
+            "## Compared to prior round\n\n| Finding | Status | Evidence |\n|---|---|---|\n",
+        );
         for f in fix_results {
-            md.push_str(&format!("| {} | {} | {} |\n", f.finding_id, f.status, f.evidence));
+            md.push_str(&format!(
+                "| {} | {} | {} |\n",
+                f.finding_id, f.status, f.evidence
+            ));
         }
         let rotated = fix_results.iter().filter(|f| f.status == "ROTATED").count();
         if rotated > 0 {
@@ -87,7 +119,10 @@ pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
             md.push_str(&format!("  - {}\n", d));
         }
     }
-    md.push_str(&format!("- policy violations: {}\n\n", quant.policy_violation_count));
+    md.push_str(&format!(
+        "- policy violations: {}\n\n",
+        quant.policy_violation_count
+    ));
 
     md.push_str("## Policy checklist\n\n");
     match policies {
@@ -96,7 +131,10 @@ pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
         Some(list) => {
             md.push_str("| Policy | Status | Evidence |\n|---|---|---|\n");
             for p in list {
-                md.push_str(&format!("| {} | {} | {} |\n", p.policy, p.status, p.evidence));
+                md.push_str(&format!(
+                    "| {} | {} | {} |\n",
+                    p.policy, p.status, p.evidence
+                ));
             }
             md.push('\n');
         }
@@ -123,7 +161,10 @@ pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
         md.push('\n');
     }
 
-    let mut confirmed: Vec<&Finding> = findings.iter().filter(|f| resolved.get(&f.id).map(|r| r.status.as_str()) == Some("CONFIRMED")).collect();
+    let mut confirmed: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| resolved.get(&f.id).map(|r| r.status.as_str()) == Some("CONFIRMED"))
+        .collect();
     confirmed.sort_by_key(|f| severity_rank(&f.severity));
 
     md.push_str("## Findings\n\n");
@@ -134,17 +175,32 @@ pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
         let discourse_result = r.map(|r| r.reason.as_str()).unwrap_or("");
         md.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
-            f.id, f.severity, f.classification, f.label, f.lens, f.reviewer, f.candidate_id, f.claim, f.recommendation, discourse_result
+            f.id,
+            f.severity,
+            f.classification,
+            f.label,
+            f.lens,
+            f.reviewer,
+            f.candidate_id,
+            f.claim,
+            f.recommendation,
+            discourse_result
         ));
     }
     md.push('\n');
 
-    let rejected: Vec<&Finding> = findings.iter().filter(|f| resolved.get(&f.id).map(|r| r.status.as_str()) == Some("REJECTED")).collect();
+    let rejected: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| resolved.get(&f.id).map(|r| r.status.as_str()) == Some("REJECTED"))
+        .collect();
     if !rejected.is_empty() {
         md.push_str("### Rejected candidates (deemed false positive)\n\n");
         for f in &rejected {
             let reason = resolved.get(&f.id).map(|r| r.reason.as_str()).unwrap_or("");
-            md.push_str(&format!("- {} (candidate={}) — {}\n", f.id, f.candidate_id, reason));
+            md.push_str(&format!(
+                "- {} (candidate={}) — {}\n",
+                f.id, f.candidate_id, reason
+            ));
         }
         md.push('\n');
     }
@@ -158,10 +214,15 @@ pub fn write(ctx: ReportCtx) -> Result<PathBuf> {
     }
 
     md.push_str("## Discourse audit\n\n");
-    md.push_str("| Round | Move | Lens | Target | Detail | New evidence |\n|---|---|---|---|---|---|\n");
+    md.push_str(
+        "| Round | Move | Lens | Target | Detail | New evidence |\n|---|---|---|---|---|---|\n",
+    );
     for a in audit {
         for m in &a.moves {
-            md.push_str(&format!("| {} | {} | {} | {} | {} | {} |\n", a.round, m.kind, m.lens, m.target, m.detail, m.new_evidence));
+            md.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} |\n",
+                a.round, m.kind, m.lens, m.target, m.detail, m.new_evidence
+            ));
         }
     }
 
@@ -178,7 +239,10 @@ pub fn write_describe(out_dir: &Path, d: &Describe) -> Result<PathBuf> {
         md.push_str(&format!("- {}\n", w));
     }
     md.push_str(&format!("\n## Labels\n\n{}\n\n", d.labels.join(", ")));
-    md.push_str(&format!("## safe_to_publish\n\n{} — {}\n\n", d.safe_to_publish, d.safe_to_publish_note));
+    md.push_str(&format!(
+        "## safe_to_publish\n\n{} — {}\n\n",
+        d.safe_to_publish, d.safe_to_publish_note
+    ));
     let path = out_dir.join("describe.md");
     std::fs::write(&path, md).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
@@ -191,8 +255,14 @@ pub fn write_improve(out_dir: &Path, suggestions: &[Suggestion]) -> Result<PathB
         md.push_str("no suggestions\n");
     }
     for s in suggestions {
-        md.push_str(&format!("## {} — {} [{}]\n\n", s.candidate_id, s.one_sentence_summary, s.label));
-        md.push_str(&format!("Action: **{}**\n\n{}\n\n", s.action, s.suggestion_content));
+        md.push_str(&format!(
+            "## {} — {} [{}]\n\n",
+            s.candidate_id, s.one_sentence_summary, s.label
+        ));
+        md.push_str(&format!(
+            "Action: **{}**\n\n{}\n\n",
+            s.action, s.suggestion_content
+        ));
         md.push_str(&format!("```bash\n{}\n```\n\n", s.command_snippet));
     }
     let path = out_dir.join("improve.md");

@@ -6,7 +6,8 @@ use crate::spec::Spec;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-pub const POLICY_SYSTEM: &str = "You verify a policy checklist against confirmed secret-scan findings. \
+pub const POLICY_SYSTEM: &str =
+    "You verify a policy checklist against confirmed secret-scan findings. \
 Never restate a raw secret value. Respond only in the specified JSON schema.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,16 +24,31 @@ struct PolicyOutput {
 }
 
 /// spec.policy_checklist empty => None (nothing to verify).
-pub fn verify(llm: &Llm, spec: &Spec, input: &Input, confirmed: &[&Finding]) -> Result<Option<Vec<PolicyCheck>>> {
+pub fn verify(
+    llm: &Llm,
+    spec: &Spec,
+    input: &Input,
+    confirmed: &[&Finding],
+) -> Result<Option<Vec<PolicyCheck>>> {
     if spec.policy_checklist.is_empty() {
         return Ok(None);
     }
     let findings_summary = confirmed
         .iter()
-        .map(|f| format!("- [{}] candidate={} — {}", f.severity, f.candidate_id, f.claim))
+        .map(|f| {
+            format!(
+                "- [{}] candidate={} — {}",
+                f.severity, f.candidate_id, f.claim
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
-    let checklist = spec.policy_checklist.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n");
+    let checklist = spec
+        .policy_checklist
+        .iter()
+        .map(|p| format!("- {p}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let ctx = shared_context(spec, input);
     let task = format!(
         "# Task\nCheck each policy item against the confirmed findings.\n\n\
@@ -43,14 +59,21 @@ pub fn verify(llm: &Llm, spec: &Spec, input: &Input, confirmed: &[&Finding]) -> 
         fs = if findings_summary.is_empty() { "(none)".to_string() } else { findings_summary },
     );
     let system = format!("{POLICY_SYSTEM}\n\n{UNTRUSTED_DATA_SYSTEM_NOTE}");
-    let v = llm.json_ctx(Some(&ctx), &task, Some(&system)).context("policy checklist verification failed")?;
-    let out: PolicyOutput = serde_json::from_value(v).context("policy checklist schema mismatch")?;
+    let v = llm
+        .json_ctx(Some(&ctx), &task, Some(&system))
+        .context("policy checklist verification failed")?;
+    let out: PolicyOutput =
+        serde_json::from_value(v).context("policy checklist schema mismatch")?;
     Ok(Some(out.policies))
 }
 
 pub fn violations(policies: &Option<Vec<PolicyCheck>>) -> Vec<String> {
     match policies {
         None => Vec::new(),
-        Some(list) => list.iter().filter(|p| p.status == "VIOLATED").map(|p| format!("{} ({})", p.policy, p.evidence)).collect(),
+        Some(list) => list
+            .iter()
+            .filter(|p| p.status == "VIOLATED")
+            .map(|p| format!("{} ({})", p.policy, p.evidence))
+            .collect(),
     }
 }

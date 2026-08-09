@@ -63,6 +63,10 @@ impl Spec {
     }
 
     pub fn labels_prompt(&self) -> String {
-        self.labels.iter().map(|l| format!("\"{l}\"")).collect::<Vec<_>>().join(", ")
+        self.labels
+            .iter()
+            .map(|l| format!("\"{l}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }

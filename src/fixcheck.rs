@@ -30,13 +30,23 @@ struct FixCheckOutput {
     results: Vec<FixStatus>,
 }
 
-pub fn run(llm: &Llm, spec: &Spec, input: &Input, prior_confirmed: &[Finding]) -> Result<Vec<FixStatus>> {
+pub fn run(
+    llm: &Llm,
+    spec: &Spec,
+    input: &Input,
+    prior_confirmed: &[Finding],
+) -> Result<Vec<FixStatus>> {
     if prior_confirmed.is_empty() {
         return Ok(Vec::new());
     }
     let list = prior_confirmed
         .iter()
-        .map(|f| format!("- id={} | candidate={} | {}\n  evidence: {}", f.id, f.candidate_id, f.claim, f.evidence))
+        .map(|f| {
+            format!(
+                "- id={} | candidate={} | {}\n  evidence: {}",
+                f.id, f.candidate_id, f.claim, f.evidence
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let ctx = shared_context(spec, input);
@@ -48,7 +58,9 @@ pub fn run(llm: &Llm, spec: &Spec, input: &Input, prior_confirmed: &[Finding]) -
         list = list
     );
     let system = format!("{FIXCHECK_SYSTEM}\n\n{UNTRUSTED_DATA_SYSTEM_NOTE}");
-    let v = llm.json_ctx(Some(&ctx), &task, Some(&system)).context("fix check failed")?;
+    let v = llm
+        .json_ctx(Some(&ctx), &task, Some(&system))
+        .context("fix check failed")?;
     let out: FixCheckOutput = serde_json::from_value(v).context("fix check schema mismatch")?;
     Ok(out.results)
 }

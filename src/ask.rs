@@ -12,5 +12,6 @@ pub fn run(llm: &Llm, spec: &Spec, input: &Input, question: &str) -> Result<Stri
     let ctx = shared_context(spec, input);
     let task = format!("# Question\n{question}\n");
     let system = format!("{ASK_SYSTEM}\n\n{UNTRUSTED_DATA_SYSTEM_NOTE}");
-    llm.text_ctx(Some(&ctx), &task, Some(&system)).context("ask failed")
+    llm.text_ctx(Some(&ctx), &task, Some(&system))
+        .context("ask failed")
 }

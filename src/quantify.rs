@@ -28,7 +28,10 @@ fn score(findings: &[Finding], resolved: &HashMap<String, Resolution>) -> (i64, 
         if resolved.get(&f.id).map(|r| r.status.as_str()) == Some("CONFIRMED") {
             let p = severity_penalty(&f.severity);
             total -= p;
-            deductions.push(format!("[{}] candidate={} -{} pts — {}", f.severity, f.candidate_id, p, f.claim));
+            deductions.push(format!(
+                "[{}] candidate={} -{} pts — {}",
+                f.severity, f.candidate_id, p, f.claim
+            ));
         }
     }
     (total.max(0), deductions)
@@ -56,14 +59,21 @@ fn verdict(
     if hard_gate_hit(candidates, findings) {
         return "BLOCK".to_string();
     }
-    let confirmed: Vec<&Finding> = findings.iter().filter(|f| resolved.get(&f.id).map(|r| r.status.as_str()) == Some("CONFIRMED")).collect();
+    let confirmed: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| resolved.get(&f.id).map(|r| r.status.as_str()) == Some("CONFIRMED"))
+        .collect();
     if confirmed.iter().any(|f| f.severity == "P0") {
         return "BLOCK".to_string();
     }
     if checks.iter().any(|c| c.status == CheckStatus::Fail) {
         return "BLOCK".to_string();
     }
-    if confirmed.iter().any(|f| f.severity == "P1" || f.severity == "P2") || policy_violation_count > 0 {
+    if confirmed
+        .iter()
+        .any(|f| f.severity == "P1" || f.severity == "P2")
+        || policy_violation_count > 0
+    {
         return "WARN".to_string();
     }
     "PASS".to_string()
@@ -77,14 +87,25 @@ pub fn summarize(
     policy_violation_count: usize,
 ) -> QuantSummary {
     let (sc, mut deductions) = score(findings, resolved);
-    let v = verdict(candidates, findings, resolved, checks, policy_violation_count);
+    let v = verdict(
+        candidates,
+        findings,
+        resolved,
+        checks,
+        policy_violation_count,
+    );
     if v == "BLOCK" && hard_gate_hit(candidates, findings) {
         deductions.push(
             "[HARD GATE] verified-active secret or private-key material detected — BLOCK regardless of discourse verdict"
                 .to_string(),
         );
     }
-    QuantSummary { verdict: v, score: sc, score_deductions: deductions, policy_violation_count }
+    QuantSummary {
+        verdict: v,
+        score: sc,
+        score_deductions: deductions,
+        policy_violation_count,
+    }
 }
 
 #[cfg(test)]

@@ -79,7 +79,9 @@ fn gitignore_coverage_check(target: &Path, required: &[String]) -> CheckResult {
             id: "gitignore_coverage".into(),
             title: ".gitignore covers required sensitive-file patterns".into(),
             status: CheckStatus::NotApplicable,
-            evidence: "`git check-ignore` unavailable (target is not a git repo, or git is not installed)".into(),
+            evidence:
+                "`git check-ignore` unavailable (target is not a git repo, or git is not installed)"
+                    .into(),
         };
     }
     if missing.is_empty() {
@@ -87,7 +89,10 @@ fn gitignore_coverage_check(target: &Path, required: &[String]) -> CheckResult {
             id: "gitignore_coverage".into(),
             title: ".gitignore covers required sensitive-file patterns".into(),
             status: CheckStatus::Pass,
-            evidence: format!("all {} required patterns are ignored per `git check-ignore`", required.len()),
+            evidence: format!(
+                "all {} required patterns are ignored per `git check-ignore`",
+                required.len()
+            ),
         }
     } else {
         CheckResult {
@@ -96,7 +101,11 @@ fn gitignore_coverage_check(target: &Path, required: &[String]) -> CheckResult {
             status: CheckStatus::Fail,
             evidence: format!(
                 "not ignored per `git check-ignore`: {}",
-                missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                missing
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }
@@ -106,10 +115,21 @@ fn gitignore_coverage_check(target: &Path, required: &[String]) -> CheckResult {
 /// filenames are actually *tracked* — a local .env that's already gitignored is fine,
 /// this only fires on files git would actually push.
 fn tracked_sensitive_files_check(target: &Path) -> CheckResult {
-    let sensitive_names = [".env", ".env.local", ".env.production", "id_rsa", "id_ed25519", "credentials.json"];
+    let sensitive_names = [
+        ".env",
+        ".env.local",
+        ".env.production",
+        "id_rsa",
+        "id_ed25519",
+        "credentials.json",
+    ];
     let sensitive_suffixes = [".pem", ".key", ".p12", ".pfx"];
 
-    let out = Command::new("git").arg("-C").arg(target).arg("ls-files").output();
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(target)
+        .arg("ls-files")
+        .output();
     let Ok(out) = out else {
         return CheckResult {
             id: "tracked_sensitive_files".into(),
@@ -160,7 +180,11 @@ fn candidate_volume_check(candidate_count: usize) -> CheckResult {
     }
 }
 
-pub fn run_all(target: &Path, required_gitignore: &[String], candidate_count: usize) -> Vec<CheckResult> {
+pub fn run_all(
+    target: &Path,
+    required_gitignore: &[String],
+    candidate_count: usize,
+) -> Vec<CheckResult> {
     vec![
         gitignore_coverage_check(target, required_gitignore),
         tracked_sensitive_files_check(target),

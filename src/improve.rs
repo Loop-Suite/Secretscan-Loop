@@ -41,7 +41,9 @@ pub fn run(llm: &Llm, spec: &Spec, input: &Input) -> Result<Vec<Suggestion>> {
         labels = spec.labels_prompt(),
     );
     let system = format!("{IMPROVE_SYSTEM}\n\n{UNTRUSTED_DATA_SYSTEM_NOTE}");
-    let v = llm.json_ctx(Some(&ctx), &task, Some(&system)).context("improve failed")?;
+    let v = llm
+        .json_ctx(Some(&ctx), &task, Some(&system))
+        .context("improve failed")?;
     let out: ImproveOutput = serde_json::from_value(v).context("improve schema mismatch")?;
     Ok(out.suggestions)
 }

@@ -30,7 +30,7 @@ pub struct Candidate {
     /// The containing line, with every matched secret substring found on that line
     /// (across all rules/sources sharing that line) replaced by its masked form.
     pub context_line: String,
-    pub source: String, // "builtin" | "gitleaks" | "trufflehog"
+    pub source: String,          // "builtin" | "gitleaks" | "trufflehog"
     pub confidence_hint: String, // "high" | "medium" | "low" — rule-author's prior, not a verdict
     /// true => this candidate must BLOCK regardless of LLM/discourse judgment (quantify.rs
     /// hard gate): TruffleHog live-verified secrets, or any private-key-shaped rule match.
@@ -70,7 +70,11 @@ fn mask(raw: &str) -> String {
     let chars: Vec<char> = raw.chars().collect();
     let head: String = chars[..keep].iter().collect();
     let tail: String = chars[n - keep..].iter().collect();
-    format!("{head}{}...{}{tail} (len={n})", "*".repeat(4), "*".repeat(4))
+    format!(
+        "{head}{}...{}{tail} (len={n})",
+        "*".repeat(4),
+        "*".repeat(4)
+    )
 }
 
 /// Mask every occurrence of every raw value in `raws` inside `line`. Longest values are
@@ -109,17 +113,36 @@ fn normalize_rel_path(target: &Path, file: &str) -> String {
         .strip_prefix(&format!("{target_str}/"))
         .or_else(|| f.strip_prefix(&target_str))
         .unwrap_or(&f);
-    stripped.trim_start_matches('/').trim_start_matches("./").to_string()
+    stripped
+        .trim_start_matches('/')
+        .trim_start_matches("./")
+        .to_string()
 }
 
-fn fingerprint(key: &RandomState, rule_id: &str, rel_path: &str, line: usize, secret: &str) -> String {
-    format!("{}|{}|{}|{:016x}", rule_id, rel_path, line, secret_digest(key, secret))
+fn fingerprint(
+    key: &RandomState,
+    rule_id: &str,
+    rel_path: &str,
+    line: usize,
+    secret: &str,
+) -> String {
+    format!(
+        "{}|{}|{}|{:016x}",
+        rule_id,
+        rel_path,
+        line,
+        secret_digest(key, secret)
+    )
 }
 
 /// True for TruffleHog-verified secrets or any rule/detector whose id names a private-key
 /// family — these must hard-BLOCK (see quantify.rs), never PASS purely on LLM discourse.
 fn is_private_key_rule(rule_id: &str) -> bool {
-    let norm: String = rule_id.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+    let norm: String = rule_id
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
     norm.contains("privatekey")
 }
 
@@ -133,16 +156,56 @@ struct Rule {
 /// high-entropy-assignment fallback (lower confidence, needs persona judgment more).
 fn rules() -> Vec<Rule> {
     vec![
-        Rule { id: "aws_access_key_id", re: r"AKIA[0-9A-Z]{16}", confidence: "high" },
-        Rule { id: "github_token", re: r"gh[pousr]_[A-Za-z0-9]{36,255}", confidence: "high" },
-        Rule { id: "anthropic_api_key", re: r"sk-ant-[A-Za-z0-9_-]{20,}", confidence: "high" },
-        Rule { id: "openai_api_key", re: r"sk-[A-Za-z0-9]{20,}(?:T3BlbkFJ[A-Za-z0-9]{20,})?", confidence: "high" },
-        Rule { id: "slack_token", re: r"xox[baprs]-[A-Za-z0-9-]{10,}", confidence: "high" },
-        Rule { id: "google_api_key", re: r"AIza[0-9A-Za-z_-]{35}", confidence: "high" },
-        Rule { id: "stripe_key", re: r"[sp]k_(live|test)_[A-Za-z0-9]{16,}", confidence: "high" },
-        Rule { id: "tavily_api_key", re: r"tvly-[A-Za-z0-9_-]{20,}", confidence: "high" },
-        Rule { id: "private_key_block", re: r"-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----", confidence: "high" },
-        Rule { id: "slack_webhook", re: r"https://hooks\.slack\.com/services/[A-Za-z0-9/]+", confidence: "medium" },
+        Rule {
+            id: "aws_access_key_id",
+            re: r"AKIA[0-9A-Z]{16}",
+            confidence: "high",
+        },
+        Rule {
+            id: "github_token",
+            re: r"gh[pousr]_[A-Za-z0-9]{36,255}",
+            confidence: "high",
+        },
+        Rule {
+            id: "anthropic_api_key",
+            re: r"sk-ant-[A-Za-z0-9_-]{20,}",
+            confidence: "high",
+        },
+        Rule {
+            id: "openai_api_key",
+            re: r"sk-[A-Za-z0-9]{20,}(?:T3BlbkFJ[A-Za-z0-9]{20,})?",
+            confidence: "high",
+        },
+        Rule {
+            id: "slack_token",
+            re: r"xox[baprs]-[A-Za-z0-9-]{10,}",
+            confidence: "high",
+        },
+        Rule {
+            id: "google_api_key",
+            re: r"AIza[0-9A-Za-z_-]{35}",
+            confidence: "high",
+        },
+        Rule {
+            id: "stripe_key",
+            re: r"[sp]k_(live|test)_[A-Za-z0-9]{16,}",
+            confidence: "high",
+        },
+        Rule {
+            id: "tavily_api_key",
+            re: r"tvly-[A-Za-z0-9_-]{20,}",
+            confidence: "high",
+        },
+        Rule {
+            id: "private_key_block",
+            re: r"-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----",
+            confidence: "high",
+        },
+        Rule {
+            id: "slack_webhook",
+            re: r"https://hooks\.slack\.com/services/[A-Za-z0-9/]+",
+            confidence: "medium",
+        },
         Rule {
             id: "generic_high_entropy_assignment",
             re: r#"(?i)(api[_-]?key|secret|token|password|passwd|access[_-]?key)\s*[:=]\s*['"]([A-Za-z0-9_\-/+=]{20,})['"]"#,
@@ -151,7 +214,16 @@ fn rules() -> Vec<Rule> {
     ]
 }
 
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", "dist", "build", ".venv", "venv", "__pycache__"];
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "__pycache__",
+];
 
 /// `path` must already be relative to the scan root — see call site in `builtin_scan`.
 /// (Issue #7: matching against an absolute/full path could false-positive-skip an entire
@@ -172,7 +244,11 @@ fn is_probably_binary(bytes: &[u8]) -> bool {
 pub fn builtin_scan(target: &Path, key: &RandomState) -> Vec<Candidate> {
     let compiled: Vec<(Regex, &Rule)> = rules()
         .into_iter()
-        .filter_map(|r| Regex::new(r.re).ok().map(|re| (re, Box::leak(Box::new(r)) as &Rule)))
+        .filter_map(|r| {
+            Regex::new(r.re)
+                .ok()
+                .map(|re| (re, Box::leak(Box::new(r)) as &Rule))
+        })
         .collect();
     let mut out = Vec::new();
     let mut counter = 0usize;
@@ -182,11 +258,15 @@ pub fn builtin_scan(target: &Path, key: &RandomState) -> Vec<Candidate> {
         if !entry.file_type().is_file() || should_skip(rel_path) {
             continue;
         }
-        let Ok(bytes) = std::fs::read(entry.path()) else { continue };
+        let Ok(bytes) = std::fs::read(entry.path()) else {
+            continue;
+        };
         if bytes.len() > 5_000_000 || is_probably_binary(&bytes) {
             continue;
         }
-        let Ok(text) = String::from_utf8(bytes) else { continue };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
         let rel = rel_path.to_string_lossy().to_string();
 
         for (line_no, line) in text.lines().enumerate() {
@@ -229,7 +309,11 @@ fn which(bin: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).find_map(|dir| {
         let full = dir.join(bin);
-        if full.is_file() { Some(full) } else { None }
+        if full.is_file() {
+            Some(full)
+        } else {
+            None
+        }
     })
 }
 
@@ -275,19 +359,34 @@ pub fn try_gitleaks(target: &Path, scope: &ScanScope, key: &RandomState) -> Opti
     let mut cmd = Command::new(bin);
     match scope {
         ScanScope::Filesystem => {
-            cmd.arg("detect").arg("--no-git").arg("--source").arg(target);
+            cmd.arg("detect")
+                .arg("--no-git")
+                .arg("--source")
+                .arg(target);
         }
         ScanScope::Staged => {
-            cmd.arg("protect").arg("--staged").arg("--source").arg(target);
+            cmd.arg("protect")
+                .arg("--staged")
+                .arg("--source")
+                .arg(target);
         }
         ScanScope::Range(range) => {
-            cmd.arg("detect").arg("--source").arg(target).arg("--log-opts").arg(range);
+            cmd.arg("detect")
+                .arg("--source")
+                .arg(target)
+                .arg("--log-opts")
+                .arg(range);
         }
         ScanScope::History => {
             cmd.arg("detect").arg("--source").arg(target);
         }
     }
-    cmd.arg("--report-format").arg("json").arg("--report-path").arg("/dev/stdout").arg("--exit-code").arg("0");
+    cmd.arg("--report-format")
+        .arg("json")
+        .arg("--report-path")
+        .arg("/dev/stdout")
+        .arg("--exit-code")
+        .arg("0");
     let out = cmd.output().ok()?;
     let arr: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     let items = arr.as_array()?;
@@ -302,12 +401,34 @@ pub fn try_gitleaks(target: &Path, scope: &ScanScope, key: &RandomState) -> Opti
     let raws: Vec<Raw> = items
         .iter()
         .map(|item| {
-            let file = item.get("File").and_then(|v| v.as_str()).unwrap_or("UNKNOWN").to_string();
+            let file = item
+                .get("File")
+                .and_then(|v| v.as_str())
+                .unwrap_or("UNKNOWN")
+                .to_string();
             let line = item.get("StartLine").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let rule = item.get("RuleID").and_then(|v| v.as_str()).unwrap_or("gitleaks-rule").to_string();
-            let secret = item.get("Secret").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let raw_match = item.get("Match").and_then(|v| v.as_str()).unwrap_or(&secret).to_string();
-            Raw { file, line, rule, secret, raw_match }
+            let rule = item
+                .get("RuleID")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gitleaks-rule")
+                .to_string();
+            let secret = item
+                .get("Secret")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let raw_match = item
+                .get("Match")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&secret)
+                .to_string();
+            Raw {
+                file,
+                line,
+                rule,
+                secret,
+                raw_match,
+            }
         })
         .collect();
 
@@ -315,12 +436,18 @@ pub fn try_gitleaks(target: &Path, scope: &ScanScope, key: &RandomState) -> Opti
     // there, not just its own (issue #4).
     let mut by_loc: HashMap<(String, usize), Vec<String>> = HashMap::new();
     for r in &raws {
-        by_loc.entry((r.file.clone(), r.line)).or_default().push(r.secret.clone());
+        by_loc
+            .entry((r.file.clone(), r.line))
+            .or_default()
+            .push(r.secret.clone());
     }
 
     let mut result = Vec::new();
     for (i, r) in raws.into_iter().enumerate() {
-        let secrets_here = by_loc.get(&(r.file.clone(), r.line)).cloned().unwrap_or_default();
+        let secrets_here = by_loc
+            .get(&(r.file.clone(), r.line))
+            .cloned()
+            .unwrap_or_default();
         let raw_refs: Vec<&str> = secrets_here.iter().map(|s| s.as_str()).collect();
         let masked_context = mask_line_all(&r.raw_match, &raw_refs);
         let rel = normalize_rel_path(target, &r.file);
@@ -366,7 +493,11 @@ fn trufflehog_file_and_line(v: &serde_json::Value) -> (String, usize) {
 ///   (trufflehog has no native "staged" mode; this is the closest equivalent.)
 /// - Range: `git file://<target> --since-commit BASE --branch HEAD`.
 /// - History: `git file://<target>` — full default-branch history.
-pub fn try_trufflehog(target: &Path, scope: &ScanScope, key: &RandomState) -> Option<Vec<Candidate>> {
+pub fn try_trufflehog(
+    target: &Path,
+    scope: &ScanScope,
+    key: &RandomState,
+) -> Option<Vec<Candidate>> {
     let bin = which("trufflehog")?;
     let mut cmd = Command::new(bin);
     match scope {
@@ -385,7 +516,12 @@ pub fn try_trufflehog(target: &Path, scope: &ScanScope, key: &RandomState) -> Op
         }
         ScanScope::Range(range) => {
             let (base, head) = parse_range(range);
-            cmd.arg("git").arg(format!("file://{}", target.display())).arg("--since-commit").arg(base).arg("--branch").arg(head);
+            cmd.arg("git")
+                .arg(format!("file://{}", target.display()))
+                .arg("--since-commit")
+                .arg(base)
+                .arg("--branch")
+                .arg(head);
         }
         ScanScope::History => {
             cmd.arg("git").arg(format!("file://{}", target.display()));
@@ -396,8 +532,14 @@ pub fn try_trufflehog(target: &Path, scope: &ScanScope, key: &RandomState) -> Op
     let text = String::from_utf8_lossy(&out.stdout);
     let mut result = Vec::new();
     for (i, line) in text.lines().enumerate() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        let detector = v.get("DetectorName").and_then(|x| x.as_str()).unwrap_or("trufflehog-rule").to_string();
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let detector = v
+            .get("DetectorName")
+            .and_then(|x| x.as_str())
+            .unwrap_or("trufflehog-rule")
+            .to_string();
         let raw = v.get("Raw").and_then(|x| x.as_str()).unwrap_or("");
         let (file, tline) = trufflehog_file_and_line(&v);
         let verified = v.get("Verified").and_then(|x| x.as_bool()).unwrap_or(false);
@@ -412,7 +554,11 @@ pub fn try_trufflehog(target: &Path, scope: &ScanScope, key: &RandomState) -> Op
             source: "trufflehog".to_string(),
             // TruffleHog already did live verification — treat verified hits as high confidence,
             // unverified as medium (still pattern-matched, just not confirmed live).
-            confidence_hint: if verified { "high".to_string() } else { "medium".to_string() },
+            confidence_hint: if verified {
+                "high".to_string()
+            } else {
+                "medium".to_string()
+            },
             hard_verified: verified || is_private_key_rule(&detector),
             fingerprint: fingerprint(key, &detector, &rel, tline, raw),
         });
@@ -454,7 +600,13 @@ mod tests {
     #[test]
     fn mask_line_all_masks_every_secret_on_the_line() {
         let line = r#"aws="AKIAABCDEFGHIJKLMNOP" gh="ghp_0123456789012345678901234567890123456""#;
-        let masked = mask_line_all(line, &["AKIAABCDEFGHIJKLMNOP", "ghp_0123456789012345678901234567890123456"]);
+        let masked = mask_line_all(
+            line,
+            &[
+                "AKIAABCDEFGHIJKLMNOP",
+                "ghp_0123456789012345678901234567890123456",
+            ],
+        );
         assert!(!masked.contains("AKIAABCDEFGHIJKLMNOP"));
         assert!(!masked.contains("ghp_0123456789012345678901234567890123456"));
     }
@@ -479,9 +631,27 @@ mod tests {
     #[test]
     fn fingerprint_dedups_same_secret_across_sources() {
         let key = RandomState::new();
-        let a = fingerprint(&key, "aws_access_key_id", "src/main.rs", 10, "AKIAABCDEFGHIJKLMNOP");
-        let b = fingerprint(&key, "aws_access_key_id", "src/main.rs", 10, "AKIAABCDEFGHIJKLMNOP");
-        let c = fingerprint(&key, "aws_access_key_id", "src/main.rs", 11, "AKIAABCDEFGHIJKLMNOP");
+        let a = fingerprint(
+            &key,
+            "aws_access_key_id",
+            "src/main.rs",
+            10,
+            "AKIAABCDEFGHIJKLMNOP",
+        );
+        let b = fingerprint(
+            &key,
+            "aws_access_key_id",
+            "src/main.rs",
+            10,
+            "AKIAABCDEFGHIJKLMNOP",
+        );
+        let c = fingerprint(
+            &key,
+            "aws_access_key_id",
+            "src/main.rs",
+            11,
+            "AKIAABCDEFGHIJKLMNOP",
+        );
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
