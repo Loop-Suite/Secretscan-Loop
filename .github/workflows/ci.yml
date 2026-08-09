@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust format
+        run: cargo fmt --all -- --check
+      - name: Cargo check
+        run: cargo check --workspace --all-targets
+      - name: Cargo test
+        run: cargo test --workspace --all-targets

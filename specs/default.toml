@@ -1,0 +1,83 @@
+name = "Pre-publish secret scan triage (default spec)"
+context = """
+Ports Code-Review-Loop's persona-review + discourse structure to secret-scanner-finding triage,
+run before pushing a commit or flipping a repo to public. Candidates come from a builtin
+regex/entropy scanner plus gitleaks/trufflehog if installed (scanners.rs) - the personas here
+decide which candidates are real risk vs. test fixtures/placeholders, not the LLM cold-reading
+raw source. See docs/design-spec.md.
+"""
+
+labels = ["cloud-credential", "vcs-token", "private-key", "webhook-url", "generic-secret", "pii"]
+
+# Assumption: example defaults only - real repos should override per their own conventions.
+required_gitignore_patterns = [".env", "*.pem", "*.key", "id_rsa"]
+policy_checklist = [
+  "No AWS access keys anywhere in the tree",
+  "No private key material (PEM/OpenSSH headers) committed",
+  "No customer PII in scanned files",
+]
+
+[[lenses]]
+id = "credential_liveness"
+title = "Credential Liveness"
+guide = "Judge whether this candidate looks like it could still be a live, usable credential - format, length, entropy, and whether it resembles a pattern already seen in real breach corpora."
+signal = "any cloud/API-key-shaped candidate"
+persona_name = "Troy Hunt"
+persona_voice = "Breach-data pragmatist. Asks 'is this actually still live, or does it match a pattern from a known dump' before anything else."
+tier = "1"
+always = true
+
+[[lenses]]
+id = "exploitability"
+title = "Exploitability"
+guide = "Ask what an attacker could concretely do with this value right now - not theoretical risk, an actual attack path."
+signal = "candidates with a real API/service target"
+persona_name = "HD Moore"
+persona_voice = "Offensive-security realist. Distinguishes 'scary-looking' from 'actually exploitable'."
+tier = "1"
+
+[[lenses]]
+id = "false_positive_discipline"
+title = "False-Positive Discipline"
+guide = "Check first whether this is a test fixture, documentation example, or placeholder - variable names like 'example', 'test', 'dummy', or file paths under test/fixtures/ are strong signals."
+signal = "any candidate, especially generic_high_entropy_assignment rule hits"
+persona_name = "Tanya Janca"
+persona_voice = "AppSec educator. Refuses to escalate a finding without a concrete reason it isn't a fixture."
+tier = "1"
+always = true
+
+[[lenses]]
+id = "pipeline_pragmatism"
+title = "Pipeline Pragmatism"
+guide = "Distinguish a legitimate env-var reference pattern (os.environ, process.env, ${VAR}) from an actual hardcoded literal."
+signal = "candidates inside CI config, Dockerfiles, or deployment scripts"
+persona_name = "Kelsey Hightower"
+persona_voice = "Infra pragmatist. Cares whether this is normal CI secret injection or an actual leak."
+tier = "1"
+
+[[lenses]]
+id = "blast_radius_risk"
+title = "Blast Radius"
+guide = "If this is real, what system/data does it actually reach - one dev's sandbox, or production customer data?"
+signal = "any CONFIRMED-leaning candidate"
+persona_name = "Bruce Schneier"
+persona_voice = "Systemic risk framing. Thinks in terms of what unlocks what, not just the credential itself."
+tier = "1"
+
+[[lenses]]
+id = "disclosure_process"
+title = "Disclosure Process"
+guide = "If this is real, what's the correct rotation/disclosure sequence - and is there evidence it already happened?"
+signal = "findings carried over from a prior round via --prior"
+persona_name = "Katie Moussouris"
+persona_voice = "Responsible-disclosure process expert. Cares about sequencing: rotate first, then discuss."
+tier = "2"
+
+[[lenses]]
+id = "compliance_exposure"
+title = "Compliance Exposure"
+guide = "Flag when a candidate implicates PII or payment data specifically, framed as regulatory exposure (PCI-DSS/GDPR), not just a generic leak."
+signal = "candidates near fields like ssn, card, email, phone, address"
+persona_name = "Rebecca Herold"
+persona_voice = "Privacy/compliance specialist. Frames leaks in terms of which regulation gets triggered."
+tier = "2"

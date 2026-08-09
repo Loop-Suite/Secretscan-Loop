@@ -1,0 +1,21 @@
+[package]
+name = "secretscan-loop"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Loop-Suite/secretscan-loop"
+description = "Multi-persona review + discourse cross-examination CLI that triages secret-scanner findings before you push or go public"
+
+[[bin]]
+name = "secretscan"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+ureq = { version = "2", features = ["json"] }
+regex = "1"
+walkdir = "2"
