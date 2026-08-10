@@ -4,9 +4,11 @@
 //! (docs/design-spec.md §1).
 //!
 //! SAFETY: nothing in this module ever returns, logs, or serializes the raw secret value.
-//! Every Candidate only carries a masked preview, plus a one-way `fingerprint` (rule_id +
-//! normalized path + line + a keyed hash of the secret — see `secret_digest`). The keyed
-//! hash uses a fresh random key generated once per `scan_all()` call, so it is not
+//! Every Candidate only carries a masked preview, plus a one-way `fingerprint` (normalized
+//! path + line + a keyed hash of the secret — see `secret_digest`; deliberately *not*
+//! rule_id, see issue #6 — two rules/sources matching the identical secret text at the
+//! identical location are the same finding regardless of what each one calls itself). The
+//! keyed hash uses a fresh random key generated once per `scan_all()` call, so it is not
 //! reversible and not comparable across separate runs — it only exists to dedup findings
 //! that the 3 scanners (builtin/gitleaks/trufflehog) all reported within *this* run.
 
@@ -36,8 +38,9 @@ pub struct Candidate {
     /// hard gate): TruffleHog live-verified secrets, or any private-key-shaped rule match.
     #[serde(default)]
     pub hard_verified: bool,
-    /// Dedup key: rule_id + normalized relative path + line + keyed hash of the raw secret.
-    /// Never the raw secret itself — see module doc.
+    /// Dedup key: normalized relative path + line + keyed hash of the raw secret. Deliberately
+    /// excludes rule_id (issue #6) so the same secret matched by two different rules/sources
+    /// still dedups. Never the raw secret itself — see module doc.
     #[serde(default)]
     pub fingerprint: String,
 }
@@ -60,13 +63,16 @@ impl Default for ScanScope {
 }
 
 /// Show enough of a token to identify its *type* and length without exposing the secret.
-/// Prefix length scales with total length; middle is always masked.
+/// Prefix length scales with total length; middle is always masked. docs/design-spec.md §3:
+/// "exposing only the first 4 and last 4 characters" — the lower clamp bound must stay small
+/// (1, not 3) so lengths just above the `n <= 8` cutoff don't reveal a disproportionate
+/// fraction of the secret (issue #5: a floor of 3 revealed up to 6/9 = 67% of a 9-char value).
 fn mask(raw: &str) -> String {
     let n = raw.chars().count();
     if n <= 8 {
         return "*".repeat(n.max(1));
     }
-    let keep = (n / 5).clamp(3, 6);
+    let keep = (n / 5).clamp(1, 6);
     let chars: Vec<char> = raw.chars().collect();
     let head: String = chars[..keep].iter().collect();
     let tail: String = chars[n - keep..].iter().collect();
@@ -119,20 +125,9 @@ fn normalize_rel_path(target: &Path, file: &str) -> String {
         .to_string()
 }
 
-fn fingerprint(
-    key: &RandomState,
-    rule_id: &str,
-    rel_path: &str,
-    line: usize,
-    secret: &str,
-) -> String {
-    format!(
-        "{}|{}|{}|{:016x}",
-        rule_id,
-        rel_path,
-        line,
-        secret_digest(key, secret)
-    )
+/// Deliberately excludes rule_id — see issue #6 and the module/struct docs above.
+fn fingerprint(key: &RandomState, rel_path: &str, line: usize, secret: &str) -> String {
+    format!("{}|{}|{:016x}", rel_path, line, secret_digest(key, secret))
 }
 
 /// True for TruffleHog-verified secrets or any rule/detector whose id names a private-key
@@ -324,7 +319,7 @@ pub fn builtin_scan(target: &Path, key: &RandomState) -> Vec<Candidate> {
                     source: "builtin".to_string(),
                     confidence_hint: rule.confidence.to_string(),
                     hard_verified: is_private_key_rule(rule.id),
-                    fingerprint: fingerprint(key, rule.id, &rel, line_no + 1, raw),
+                    fingerprint: fingerprint(key, &rel, line_no + 1, raw),
                 });
             }
         }
@@ -488,7 +483,7 @@ pub fn try_gitleaks(target: &Path, scope: &ScanScope, key: &RandomState) -> Opti
             source: "gitleaks".to_string(),
             confidence_hint: "high".to_string(), // gitleaks default rules are curated, not raw entropy
             hard_verified: is_private_key_rule(&r.rule),
-            fingerprint: fingerprint(key, &r.rule, &rel, r.line, &r.secret),
+            fingerprint: fingerprint(key, &rel, r.line, &r.secret),
         });
     }
     Some(result)
@@ -587,17 +582,35 @@ pub fn try_trufflehog(
                 "medium".to_string()
             },
             hard_verified: verified || is_private_key_rule(&detector),
-            fingerprint: fingerprint(key, &detector, &rel, tline, raw),
+            fingerprint: fingerprint(key, &rel, tline, raw),
         });
     }
     Some(result)
 }
 
+/// Keeps the first-seen candidate per fingerprint, but ORs `hard_verified` across every
+/// candidate sharing that fingerprint first (issue #6) — otherwise, now that dedup collapses
+/// across rules/sources more aggressively (rule_id no longer part of the fingerprint), a
+/// duplicate that happened to be hard-verified (TruffleHog `Verified=true`, or a
+/// private-key-shaped rule/detector) could have that signal silently dropped just because a
+/// lower-priority duplicate for the same secret was inserted first, defeating the
+/// quantify.rs hard-block gate.
 fn dedup_by_fingerprint(candidates: Vec<Candidate>) -> Vec<Candidate> {
+    let mut hard_verified_by_fp: HashMap<String, bool> = HashMap::new();
+    for c in &candidates {
+        let entry = hard_verified_by_fp
+            .entry(c.fingerprint.clone())
+            .or_default();
+        *entry = *entry || c.hard_verified;
+    }
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::with_capacity(candidates.len());
-    for c in candidates {
+    for mut c in candidates {
         if seen.insert(c.fingerprint.clone()) {
+            c.hard_verified = hard_verified_by_fp
+                .get(&c.fingerprint)
+                .copied()
+                .unwrap_or(c.hard_verified);
             out.push(c);
         }
     }
@@ -606,8 +619,9 @@ fn dedup_by_fingerprint(candidates: Vec<Candidate>) -> Vec<Candidate> {
 
 /// Merge all available sources. External tools run only if present on PATH; builtin always runs
 /// so the tool is fully functional with zero external dependencies. Results sharing the same
-/// (rule_id, path, line, secret) fingerprint across the 3 sources are deduped (issue #6) —
-/// keeping the first occurrence (builtin, then gitleaks, then trufflehog).
+/// (path, line, secret) fingerprint — regardless of which rule/source reported them, see
+/// issue #6 — are deduped, keeping the first occurrence (builtin, then gitleaks, then
+/// trufflehog) with `hard_verified` OR'd in from every duplicate.
 pub fn scan_all(target: &Path, scope: &ScanScope) -> Vec<Candidate> {
     let key = RandomState::new();
     let mut all = builtin_scan(target, &key);
@@ -656,30 +670,97 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_dedups_same_secret_across_sources() {
+    fn fingerprint_dedups_same_secret_regardless_of_rule_id() {
+        // issue #6: fingerprint must not include rule_id, so the same secret at the same
+        // location dedups even when two different rules/sources reported it under different
+        // names (builtin `aws_access_key_id` vs. gitleaks `aws-access-token` vs. trufflehog
+        // `AWS`, for example).
         let key = RandomState::new();
-        let a = fingerprint(
-            &key,
-            "aws_access_key_id",
-            "src/main.rs",
-            10,
-            "AKIAABCDEFGHIJKLMNOP",
-        );
-        let b = fingerprint(
-            &key,
-            "aws_access_key_id",
-            "src/main.rs",
-            10,
-            "AKIAABCDEFGHIJKLMNOP",
-        );
-        let c = fingerprint(
-            &key,
-            "aws_access_key_id",
-            "src/main.rs",
-            11,
-            "AKIAABCDEFGHIJKLMNOP",
-        );
+        let a = fingerprint(&key, "src/main.rs", 10, "AKIAABCDEFGHIJKLMNOP");
+        let b = fingerprint(&key, "src/main.rs", 10, "AKIAABCDEFGHIJKLMNOP");
+        let c = fingerprint(&key, "src/main.rs", 11, "AKIAABCDEFGHIJKLMNOP");
+        let d = fingerprint(&key, "src/main.rs", 10, "AKIAZZZZZZZZZZZZZZZZ");
         assert_eq!(a, b);
-        assert_ne!(a, c);
+        assert_ne!(a, c, "different line must not collide");
+        assert_ne!(a, d, "different secret must not collide");
+    }
+
+    #[test]
+    fn dedup_collapses_same_secret_matched_by_two_different_rules() {
+        // issue #6, reproduced entirely within the builtin scanner (no gitleaks/trufflehog
+        // needed): a line like `aws_access_key = "AKIA..."` matches both the specific
+        // `aws_access_key_id` rule and the generic `generic_high_entropy_assignment` fallback
+        // on the identical secret text — before the fix these produced two undeduped
+        // Candidates for the same real secret.
+        let dir = std::env::temp_dir().join(format!(
+            "secretscan_dedup_test_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.env"),
+            "aws_access_key = \"AKIAABCDEFGHIJKLMNOP\"\n",
+        )
+        .unwrap();
+        let key = RandomState::new();
+        let raw = builtin_scan(&dir, &key);
+        assert_eq!(raw.len(), 2, "expected both rules to match: {raw:?}");
+        let deduped = dedup_by_fingerprint(raw);
+        assert_eq!(
+            deduped.len(),
+            1,
+            "the same secret at the same location must dedup to one candidate"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dedup_preserves_hard_verified_from_any_duplicate() {
+        // A duplicate's hard_verified=true must survive even if the candidate kept (first
+        // inserted) for that fingerprint was itself hard_verified=false — otherwise merging
+        // duplicates more aggressively (dropping rule_id) could silently defeat the
+        // quantify.rs hard-block gate.
+        fn candidate(hard_verified: bool) -> Candidate {
+            Candidate {
+                id: "c".into(),
+                file: "f".into(),
+                line: 1,
+                rule_id: "r".into(),
+                masked_preview: "***".into(),
+                context_line: String::new(),
+                source: "builtin".into(),
+                confidence_hint: "low".into(),
+                hard_verified,
+                fingerprint: "same-fp".into(),
+            }
+        }
+        let out = dedup_by_fingerprint(vec![candidate(false), candidate(true)]);
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].hard_verified,
+            "hard_verified must be OR'd across duplicates"
+        );
+    }
+
+    #[test]
+    fn mask_never_reveals_more_than_40_percent_for_short_secrets() {
+        // issue #5: with the clamp(3, 6) floor, a 9-char secret revealed 6/9 = 67% of its
+        // characters. After the fix (clamp(1, 6)) the ~40% ceiling that already applied at
+        // n>=15 must hold uniformly down to n=9 too.
+        for n in 9..=64usize {
+            let raw: String = (0..n).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+            let masked = mask(&raw);
+            assert!(
+                !masked.contains(&raw),
+                "n={n}: raw value must never appear whole"
+            );
+            let keep = (n / 5).clamp(1, 6);
+            let revealed = keep * 2;
+            assert!(
+                revealed * 5 <= n * 2 + 1, // revealed/n <= 0.4 (+rounding slack)
+                "n={n}: revealed {revealed}/{n} exceeds the 40% ceiling ({masked})"
+            );
+        }
     }
 }
