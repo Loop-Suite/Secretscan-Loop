@@ -20,6 +20,7 @@ The default LLM backend is a `claude -p` subprocess (the Claude Code CLI) — no
 - [Scan scope: filesystem / staged / range / history](#scan-scope)
 - [Repository layout](#repository-layout)
 - [Persona pool](#persona-pool-7-lenses)
+- [Real-world validation](#real-world-validation)
 - [Deterministic vs. LLM judgment](#deterministic-vs-llm-judgment)
 - [Discourse: cross-examination and confidence-weighted voting](#discourse-cross-examination-and-confidence-weighted-voting)
 - [Severity and verdict](#severity-and-verdict)
@@ -285,6 +286,25 @@ Defined in [`specs/default.toml`](specs/default.toml); a project can supply its 
 | `compliance_exposure` | Rebecca Herold | 2 | no | Does this implicate PII/payment data specifically (PCI-DSS/GDPR exposure)? |
 
 Each finding must carry a `label` from the spec's allowed set — the default spec allows `cloud-credential`, `vcs-token`, `private-key`, `webhook-url`, `generic-secret`, `pii`.
+
+---
+
+## Real-world validation
+
+This repo has been reviewed and actually run against itself, not just described. Three rounds — two
+static code reviews, one real `claude -p --model haiku` execution against a live test fixture —
+found and closed **7/7 issues (#2–#8)** for **$0.7846** in real LLM spend. The headline finding
+isn't a style nit: `mask()` was fed the whole regex match instead of the secret capture group for
+`generic_high_entropy_assignment`, so the tail of a real secret leaked into `masked_preview` and
+`context_line` in plaintext — a direct violation of this tool's own core safety guarantee. Fixed in
+`73d2231`. Full methodology, every issue, and what was actually checked (not assumed):
+[`evals/README.md`](evals/README.md).
+
+| Round | What | Issues | Real cost |
+|---|---|---|---|
+| 1–2 — static review | Read scanner/masking/dedup/coverage logic against README + design spec | #2–#7 | $0 |
+| 3 — real CLI execution | `claude -p --model haiku` scan x2, describe x1 against a live fixture | #8 | $0.7846 |
+| **Total** | | **7/7 closed** | **$0.7846** |
 
 ---
 
