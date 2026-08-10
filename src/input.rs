@@ -21,11 +21,20 @@ fn read_opt(p: &Option<std::path::PathBuf>) -> Result<Option<String>> {
     }
 }
 
+/// Counts files actually eligible for scanning — i.e. applies the same directory skip list
+/// (`.git`, `node_modules`, `target`, etc.) as `builtin_scan`. Without this, the count included
+/// every file physically present under `target`, so a repo with a populated `node_modules` or
+/// `target` build dir would report a "files scanned" number orders of magnitude larger than
+/// what was actually content-scanned — misrepresenting scan coverage (see GH issue: `count_files`
+/// counts files inside skipped directories).
 fn count_files(target: &Path) -> usize {
     walkdir::WalkDir::new(target)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            let rel = e.path().strip_prefix(target).unwrap_or(e.path());
+            e.file_type().is_file() && !scanners::should_skip(rel)
+        })
         .count()
 }
 
@@ -48,4 +57,30 @@ pub fn normalize(
         files_scanned,
         requirements,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_files_excludes_skipped_directories() {
+        let dir = std::env::temp_dir().join(format!(
+            "secretscan_count_files_test_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        for i in 0..20 {
+            std::fs::write(dir.join(format!("node_modules/pkg/file{i}.js")), "noop").unwrap();
+        }
+        std::fs::write(dir.join("real_source.rs"), "fn main() {}").unwrap();
+
+        assert_eq!(
+            count_files(&dir),
+            1,
+            "files under node_modules must not be counted as scanned"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

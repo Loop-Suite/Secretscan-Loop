@@ -248,7 +248,8 @@ const SKIP_DIRS: &[&str] = &[
 /// `path` must already be relative to the scan root — see call site in `builtin_scan`.
 /// (Issue #7: matching against an absolute/full path could false-positive-skip an entire
 /// repo if some ancestor directory happened to be named e.g. "build".)
-fn should_skip(path: &Path) -> bool {
+/// `pub(crate)` so `input::count_files` can apply the same skip list — see that call site.
+pub(crate) fn should_skip(path: &Path) -> bool {
     path.components().any(|c| {
         let s = c.as_os_str().to_string_lossy();
         SKIP_DIRS.iter().any(|d| s == *d)
