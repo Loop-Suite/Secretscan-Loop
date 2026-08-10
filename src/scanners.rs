@@ -83,19 +83,58 @@ fn mask(raw: &str) -> String {
     )
 }
 
-/// Mask every occurrence of every raw value in `raws` inside `line`. Longest values are
-/// replaced first so a shorter raw value that happens to be a substring of a longer one
-/// (e.g. two secrets sharing a common prefix) can't leave a partial fragment unmasked.
+/// Mask every occurrence of every raw value in `raws` inside `line`.
+///
+/// This works on byte *ranges*, not string content: find every occurrence of every raw
+/// value in the original `line`, merge overlapping/adjacent ranges, then rebuild the line
+/// in one left-to-right pass, masking each merged range as a block. Range-based merging is
+/// required (issue #15) — an earlier content-based approach (sort raws longest-first, then
+/// repeatedly `contains`/`replace` each one against a mutating `result` string) could leave
+/// a secret almost entirely unmasked whenever two raw values *partially* overlapped without
+/// either containing the other: masking the longer one first consumes the characters it
+/// shares with the shorter one, so the shorter one's exact text no longer appears in
+/// `result` and its `.contains()` check silently fails, skipping its `.replace()` entirely.
+/// Working on ranges instead means every character covered by *any* match is always masked,
+/// regardless of how many secrets overlap or how.
 fn mask_line_all(line: &str, raws: &[&str]) -> String {
-    let mut sorted: Vec<&str> = raws.iter().copied().filter(|s| !s.is_empty()).collect();
-    sorted.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    sorted.dedup();
-    let mut result = line.to_string();
-    for raw in sorted {
-        if result.contains(raw) {
-            result = result.replace(raw, &mask(raw));
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for raw in raws.iter().filter(|s| !s.is_empty()) {
+        let mut cursor = 0usize;
+        while let Some(pos) = line[cursor..].find(raw) {
+            let start = cursor + pos;
+            let end = start + raw.len();
+            ranges.push((start, end));
+            // Advance by one *character* (not one byte) past `start` so overlapping
+            // self-matches are still caught, without landing mid-character on multi-byte
+            // UTF-8 input (`line[cursor..]` below would panic on a non-boundary index).
+            let step = line[start..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
+            cursor = start + step;
         }
     }
+    if ranges.is_empty() {
+        return line.to_string();
+    }
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+
+    let mut result = String::with_capacity(line.len());
+    let mut cursor = 0usize;
+    for (start, end) in merged {
+        result.push_str(&line[cursor..start]);
+        result.push_str(&mask(&line[start..end]));
+        cursor = end;
+    }
+    result.push_str(&line[cursor..]);
     result
 }
 
@@ -274,10 +313,19 @@ pub fn builtin_scan(target: &Path, key: &RandomState) -> Vec<Candidate> {
         if !entry.file_type().is_file() || should_skip(rel_path) {
             continue;
         }
+        // Check size via metadata *before* reading — issue #16: reading the whole file
+        // first and only checking `bytes.len()` afterward defeats the cap's purpose,
+        // since a multi-GB file would already be fully loaded into memory by then.
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.len() > 5_000_000 {
+            continue;
+        }
         let Ok(bytes) = std::fs::read(entry.path()) else {
             continue;
         };
-        if bytes.len() > 5_000_000 || is_probably_binary(&bytes) {
+        if is_probably_binary(&bytes) {
             continue;
         }
         let Ok(text) = String::from_utf8(bytes) else {
@@ -762,5 +810,254 @@ mod tests {
                 "n={n}: revealed {revealed}/{n} exceeds the 40% ceiling ({masked})"
             );
         }
+    }
+
+    // --- issue #15: partial-overlap masking leak ---------------------------------------
+
+    #[test]
+    fn mask_line_all_does_not_leak_on_partial_overlap() {
+        // Two "secrets" whose spans partially overlap without either containing the
+        // other. Before the fix, masking the longer one first consumed the characters it
+        // shares with the shorter one, so the shorter one's `.contains()` check silently
+        // failed and its (mostly non-overlapping) text was left in plaintext.
+        let line = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let raw1 = &line[0..20]; // "0123456789ABCDEFGHIJ"
+        let raw2 = &line[15..36]; // "FGHIJKLMNOPQRSTUVWXYZ" — overlaps raw1 at [15,20)
+        let masked = mask_line_all(line, &[raw1, raw2]);
+        assert!(
+            !masked.contains("0123456789ABCDE"),
+            "raw1's non-overlapping prefix must not survive: {masked}"
+        );
+        assert!(!masked.contains(raw1), "{masked}");
+        assert!(!masked.contains(raw2), "{masked}");
+    }
+
+    #[test]
+    fn mask_line_all_handles_three_way_chained_overlap() {
+        // A chain of three pairwise-overlapping-but-not-nested secrets (A overlaps B,
+        // B overlaps C, A and C don't touch) must all end up merged into one masked run
+        // with nothing left unmasked.
+        let line = "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD"; // 40 chars, 10 each
+        let a = &line[0..15]; // "AAAAAAAAAABBBBB"  (10 A's + 5 B's)
+        let b = &line[10..25]; // "BBBBBBBBBBCCCCC" (10 B's + 5 C's)
+        let c = &line[20..35]; // "CCCCCCCCCCDDDDD" (10 C's + 5 D's)
+        let masked = mask_line_all(line, &[a, b, c]);
+        assert!(!masked.contains(a) && !masked.contains(b) && !masked.contains(c));
+        // The untouched tail (last 5 'D's, positions 35..40) must remain visible —
+        // proves the fix doesn't over-mask the whole line, only the covered ranges.
+        assert!(masked.ends_with("DDDDD"), "{masked}");
+    }
+
+    #[test]
+    fn mask_handles_unicode_secret_without_panicking_or_leaking() {
+        // Multi-byte UTF-8 (Korean + emoji) must not panic on char-boundary slicing and
+        // must never reveal the value whole.
+        let raw = "비밀번호값입니다🔥emoji-mixed-secret-value-1234567890";
+        let masked = mask(raw);
+        assert!(!masked.contains(raw));
+        let line = format!("token = \"{raw}\"");
+        let masked_line = mask_line_all(&line, &[raw]);
+        assert!(!masked_line.contains(raw), "{masked_line}");
+    }
+
+    #[test]
+    fn mask_fully_masks_very_short_secrets() {
+        for raw in ["", "a", "ab", "1234567", "12345678"] {
+            let masked = mask(raw);
+            if !raw.is_empty() {
+                assert!(!masked.contains(raw), "raw={raw:?} masked={masked}");
+            }
+            assert!(masked.chars().all(|c| c == '*'), "masked={masked}");
+        }
+    }
+
+    #[test]
+    fn mask_handles_very_long_secret_without_panicking() {
+        let raw: String = (0..200_000)
+            .map(|i| (b'a' + (i % 26) as u8) as char)
+            .collect();
+        let masked = mask(&raw);
+        assert!(!masked.contains(&raw));
+        // clamp(1, 6) caps reveal at 6 head + 6 tail regardless of length.
+        assert!(
+            masked.starts_with(&raw[..6]),
+            "{}",
+            &masked[..20.min(masked.len())]
+        );
+    }
+
+    fn unique_test_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "secretscan_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // --- issue #16: full-file read before size-cap check ---------------------------------
+
+    #[test]
+    fn builtin_scan_skips_file_over_size_cap() {
+        // issue #16: a file over the 5MB cap must be skipped, and skipped based on its
+        // metadata size — not only after the fact via `bytes.len()`. Put a real secret
+        // right at the end so a regression back to "read first, size-check after" would
+        // still (accidentally) find it; the fixed version must skip it before ever
+        // reading, so it must never appear in the output either way.
+        let dir = unique_test_dir("huge_file");
+        let mut content = "x".repeat(5_000_001);
+        content.push_str("\naws_key = \"AKIAABCDEFGHIJKLMNOP\"\n");
+        std::fs::write(dir.join("huge.txt"), &content).unwrap();
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key);
+        assert!(
+            out.is_empty(),
+            "file over the size cap must be skipped: {out:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- broader edge-case coverage --------------------------------------------------------
+
+    #[test]
+    fn builtin_scan_handles_empty_target_dir() {
+        let dir = unique_test_dir("empty_dir");
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key);
+        assert!(out.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn builtin_scan_handles_empty_file() {
+        let dir = unique_test_dir("empty_file");
+        std::fs::write(dir.join("empty.txt"), "").unwrap();
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key);
+        assert!(out.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn builtin_scan_ignores_non_utf8_file() {
+        let dir = unique_test_dir("bad_utf8");
+        // 0xFF is never valid as a UTF-8 lead byte.
+        std::fs::write(dir.join("bad.bin"), [b'a', b'=', 0xFF, 0xFE, b'"']).unwrap();
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key); // must not panic
+        assert!(out.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn builtin_scan_handles_very_deep_directory_tree() {
+        let dir = unique_test_dir("deep_tree");
+        let mut nested = dir.clone();
+        for i in 0..150 {
+            nested = nested.join(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("config.env"),
+            "aws_key = \"AKIAABCDEFGHIJKLMNOP\"\n",
+        )
+        .unwrap();
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key); // must not stack-overflow or hang
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].context_line.contains("AKIAABCDEFGHIJKLMNOP"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn builtin_scan_does_not_merge_secrets_split_across_two_files() {
+        // A secret's value split across two different files' content must be scanned
+        // independently — no cross-file concatenation.
+        let dir = unique_test_dir("two_files");
+        std::fs::write(dir.join("a.env"), "aws_key = \"AKIA\"\n").unwrap();
+        std::fs::write(dir.join("b.env"), "aws_key = \"ABCDEFGHIJKLMNOP\"\n").unwrap();
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key);
+        // Neither half alone matches the aws_access_key_id rule (needs `AKIA` + 16 chars
+        // in one token); the generic fallback needs >=20 chars in one quoted value, and
+        // neither half reaches that either, so this must find nothing — not a merged hit.
+        assert!(
+            out.is_empty(),
+            "must not synthesize a cross-file match: {out:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn builtin_scan_does_not_merge_secret_split_across_two_lines() {
+        // Characterization test: this scanner works line-by-line, so a single secret
+        // value wrapped across two lines is *not* detected as one token. Document that
+        // explicitly rather than leaving it as an unverified assumption — this is a
+        // detection-coverage limitation, not a masking leak (nothing unmasked is ever
+        // reported, because no candidate is produced from either half here).
+        let dir = unique_test_dir("split_line");
+        std::fs::write(
+            dir.join("wrapped.env"),
+            "aws_key = \"AKIAABCDEFGH\nIJKLMNOP\"\n",
+        )
+        .unwrap();
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key);
+        assert!(
+            out.is_empty(),
+            "line-wrapped secret unexpectedly matched: {out:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builtin_scan_does_not_follow_symlinked_files() {
+        use std::os::unix::fs::symlink;
+        let dir = unique_test_dir("symlink_file");
+        let real = dir.join("real_secret.env");
+        std::fs::write(&real, "aws_key = \"AKIAABCDEFGHIJKLMNOP\"\n").unwrap();
+        let outside = unique_test_dir("symlink_file_target_outside");
+        let real_outside = outside.join("real_secret.env");
+        std::fs::write(&real_outside, "aws_key = \"AKIAABCDEFGHIJKLMNOP\"\n").unwrap();
+        symlink(&real_outside, dir.join("link.env")).unwrap();
+
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key);
+        // `real.env` (an actual file) is found; `link.env` (a symlink) is not followed —
+        // WalkDir's default (no follow_links) reports symlinks via symlink_metadata, so
+        // `file_type().is_file()` is false for them and builtin_scan's own filter skips
+        // them. This also means a symlink can never be used to read/leak content from
+        // outside the scan target.
+        assert_eq!(
+            out.len(),
+            1,
+            "expected only the real file to be scanned: {out:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builtin_scan_does_not_hang_on_symlink_loop() {
+        use std::os::unix::fs::symlink;
+        let dir = unique_test_dir("symlink_loop");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        // sub/loop -> dir (a directory symlink cycle back to an ancestor).
+        symlink(&dir, sub.join("loop")).unwrap();
+        std::fs::write(dir.join("real.env"), "aws_key = \"AKIAABCDEFGHIJKLMNOP\"\n").unwrap();
+
+        let key = RandomState::new();
+        // Must terminate (WalkDir's default is not to follow directory symlinks) rather
+        // than recursing forever.
+        let out = builtin_scan(&dir, &key);
+        assert_eq!(out.len(), 1, "{out:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
