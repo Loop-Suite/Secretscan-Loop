@@ -313,10 +313,19 @@ pub fn builtin_scan(target: &Path, key: &RandomState) -> Vec<Candidate> {
         if !entry.file_type().is_file() || should_skip(rel_path) {
             continue;
         }
+        // Check size via metadata *before* reading — issue #16: reading the whole file
+        // first and only checking `bytes.len()` afterward defeats the cap's purpose,
+        // since a multi-GB file would already be fully loaded into memory by then.
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.len() > 5_000_000 {
+            continue;
+        }
         let Ok(bytes) = std::fs::read(entry.path()) else {
             continue;
         };
-        if bytes.len() > 5_000_000 || is_probably_binary(&bytes) {
+        if is_probably_binary(&bytes) {
             continue;
         }
         let Ok(text) = String::from_utf8(bytes) else {
@@ -875,5 +884,40 @@ mod tests {
             "{}",
             &masked[..20.min(masked.len())]
         );
+    }
+
+    fn unique_test_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "secretscan_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // --- issue #16: full-file read before size-cap check ---------------------------------
+
+    #[test]
+    fn builtin_scan_skips_file_over_size_cap() {
+        // issue #16: a file over the 5MB cap must be skipped, and skipped based on its
+        // metadata size — not only after the fact via `bytes.len()`. Put a real secret
+        // right at the end so a regression back to "read first, size-check after" would
+        // still (accidentally) find it; the fixed version must skip it before ever
+        // reading, so it must never appear in the output either way.
+        let dir = unique_test_dir("huge_file");
+        let mut content = "x".repeat(5_000_001);
+        content.push_str("\naws_key = \"AKIAABCDEFGHIJKLMNOP\"\n");
+        std::fs::write(dir.join("huge.txt"), &content).unwrap();
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key);
+        assert!(
+            out.is_empty(),
+            "file over the size cap must be skipped: {out:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
