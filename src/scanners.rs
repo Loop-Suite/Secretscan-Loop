@@ -294,9 +294,91 @@ fn is_probably_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(1024).any(|b| *b == 0)
 }
 
+/// Scan a single file already known to be in-scope, appending any matches to `out`.
+/// `rel_path` must be relative to `target`. Shared by every branch of `builtin_scan` so
+/// the size cap / binary / UTF-8 filters and match logic stay identical regardless of how
+/// the file was discovered (full walk vs. a git-provided file list).
+fn scan_file_into(
+    target: &Path,
+    rel_path: &Path,
+    compiled: &[(Regex, &Rule)],
+    key: &RandomState,
+    counter: &mut usize,
+    out: &mut Vec<Candidate>,
+) {
+    let full_path = target.join(rel_path);
+    // Check size via metadata *before* reading — issue #16: reading the whole file
+    // first and only checking `bytes.len()` afterward defeats the cap's purpose,
+    // since a multi-GB file would already be fully loaded into memory by then.
+    let Ok(meta) = std::fs::metadata(&full_path) else {
+        return;
+    };
+    if !meta.is_file() || meta.len() > 5_000_000 {
+        return;
+    }
+    let Ok(bytes) = std::fs::read(&full_path) else {
+        return;
+    };
+    if is_probably_binary(&bytes) {
+        return;
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return;
+    };
+    let rel = rel_path.to_string_lossy().replace('\\', "/");
+
+    for (line_no, line) in text.lines().enumerate() {
+        // Collect every match from every rule on this line first, so masking (below)
+        // can hide *all* of them, not just the one belonging to the rule currently
+        // producing a Candidate (issue #4).
+        let mut line_matches: Vec<(&Rule, &str)> = Vec::new();
+        for (re, rule) in compiled {
+            for cap in re.captures_iter(line) {
+                // Use the rule's designated secret group, not the whole match — for
+                // generic_high_entropy_assignment the whole match also contains the
+                // keyword/operator/quotes, which must never be treated as "the secret"
+                // (see Rule::secret_group doc).
+                if let Some(m) = cap.get(rule.secret_group).or_else(|| cap.get(0)) {
+                    line_matches.push((rule, m.as_str()));
+                }
+            }
+        }
+        if line_matches.is_empty() {
+            continue;
+        }
+        let raws: Vec<&str> = line_matches.iter().map(|(_, s)| *s).collect();
+        let masked_context = mask_line_all(line.trim(), &raws);
+
+        for (rule, raw) in &line_matches {
+            *counter += 1;
+            out.push(Candidate {
+                id: format!("builtin-{counter}"),
+                file: rel.clone(),
+                line: line_no + 1,
+                rule_id: rule.id.to_string(),
+                masked_preview: mask(raw),
+                context_line: masked_context.clone(),
+                source: "builtin".to_string(),
+                confidence_hint: rule.confidence.to_string(),
+                hard_verified: is_private_key_rule(rule.id),
+                fingerprint: fingerprint(key, &rel, line_no + 1, raw),
+            });
+        }
+    }
+}
+
 /// Built-in fallback scanner — always runs regardless of gitleaks/trufflehog availability.
-/// Walks the target directory, skips build/vendor dirs (relative to `target`) and binary files.
-pub fn builtin_scan(target: &Path, key: &RandomState) -> Vec<Candidate> {
+///
+/// Scope decides which files get scanned (issue #20: this used to always walk the entire
+/// `target` tree regardless of `scope`, so `--staged` could still flag secrets sitting in
+/// unstaged/untracked files):
+/// - Filesystem (default) / History: walk the whole `target` tree, skipping build/vendor
+///   dirs — same as before. The builtin scanner has no historical-content path, so History
+///   falls back to a working-tree walk just like it always did.
+/// - Staged: only `git diff --cached --name-only` output — mirrors `try_gitleaks`/
+///   `try_trufflehog`'s Staged handling.
+/// - Range: only `git diff --name-only <range>` output.
+pub fn builtin_scan(target: &Path, scope: &ScanScope, key: &RandomState) -> Vec<Candidate> {
     let compiled: Vec<(Regex, &Rule)> = rules()
         .into_iter()
         .filter_map(|r| {
@@ -308,67 +390,38 @@ pub fn builtin_scan(target: &Path, key: &RandomState) -> Vec<Candidate> {
     let mut out = Vec::new();
     let mut counter = 0usize;
 
-    for entry in WalkDir::new(target).into_iter().filter_map(|e| e.ok()) {
-        let rel_path = entry.path().strip_prefix(target).unwrap_or(entry.path());
-        if !entry.file_type().is_file() || should_skip(rel_path) {
-            continue;
+    match scope {
+        ScanScope::Staged => {
+            for f in staged_files(target) {
+                scan_file_into(
+                    target,
+                    Path::new(&f),
+                    &compiled,
+                    key,
+                    &mut counter,
+                    &mut out,
+                );
+            }
         }
-        // Check size via metadata *before* reading — issue #16: reading the whole file
-        // first and only checking `bytes.len()` afterward defeats the cap's purpose,
-        // since a multi-GB file would already be fully loaded into memory by then.
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        if meta.len() > 5_000_000 {
-            continue;
+        ScanScope::Range(range) => {
+            for f in range_files(target, range) {
+                scan_file_into(
+                    target,
+                    Path::new(&f),
+                    &compiled,
+                    key,
+                    &mut counter,
+                    &mut out,
+                );
+            }
         }
-        let Ok(bytes) = std::fs::read(entry.path()) else {
-            continue;
-        };
-        if is_probably_binary(&bytes) {
-            continue;
-        }
-        let Ok(text) = String::from_utf8(bytes) else {
-            continue;
-        };
-        let rel = rel_path.to_string_lossy().to_string();
-
-        for (line_no, line) in text.lines().enumerate() {
-            // Collect every match from every rule on this line first, so masking (below)
-            // can hide *all* of them, not just the one belonging to the rule currently
-            // producing a Candidate (issue #4).
-            let mut line_matches: Vec<(&Rule, &str)> = Vec::new();
-            for (re, rule) in &compiled {
-                for cap in re.captures_iter(line) {
-                    // Use the rule's designated secret group, not the whole match — for
-                    // generic_high_entropy_assignment the whole match also contains the
-                    // keyword/operator/quotes, which must never be treated as "the secret"
-                    // (see Rule::secret_group doc).
-                    if let Some(m) = cap.get(rule.secret_group).or_else(|| cap.get(0)) {
-                        line_matches.push((rule, m.as_str()));
-                    }
+        ScanScope::Filesystem | ScanScope::History => {
+            for entry in WalkDir::new(target).into_iter().filter_map(|e| e.ok()) {
+                let rel_path = entry.path().strip_prefix(target).unwrap_or(entry.path());
+                if !entry.file_type().is_file() || should_skip(rel_path) {
+                    continue;
                 }
-            }
-            if line_matches.is_empty() {
-                continue;
-            }
-            let raws: Vec<&str> = line_matches.iter().map(|(_, s)| *s).collect();
-            let masked_context = mask_line_all(line.trim(), &raws);
-
-            for (rule, raw) in &line_matches {
-                counter += 1;
-                out.push(Candidate {
-                    id: format!("builtin-{counter}"),
-                    file: rel.clone(),
-                    line: line_no + 1,
-                    rule_id: rule.id.to_string(),
-                    masked_preview: mask(raw),
-                    context_line: masked_context.clone(),
-                    source: "builtin".to_string(),
-                    confidence_hint: rule.confidence.to_string(),
-                    hard_verified: is_private_key_rule(rule.id),
-                    fingerprint: fingerprint(key, &rel, line_no + 1, raw),
-                });
+                scan_file_into(target, rel_path, &compiled, key, &mut counter, &mut out);
             }
         }
     }
@@ -397,6 +450,29 @@ fn staged_files(target: &Path) -> Vec<String> {
         .arg("--cached")
         .arg("--name-only")
         .arg("--diff-filter=ACMR")
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Files changed within a commit range (`git diff --name-only <range>`), relative to
+/// `target`. `git diff` treats `"A..B"` identically to `"A B"` (unlike `git log`, where the
+/// two-dot form means something else), so the raw `ScanScope::Range` string can be passed
+/// straight through. Empty if `target` isn't a git repo or the range is invalid.
+fn range_files(target: &Path, range: &str) -> Vec<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(target)
+        .arg("diff")
+        .arg("--name-only")
+        .arg("--diff-filter=ACMR")
+        .arg(range)
         .output();
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
@@ -672,7 +748,7 @@ fn dedup_by_fingerprint(candidates: Vec<Candidate>) -> Vec<Candidate> {
 /// trufflehog) with `hard_verified` OR'd in from every duplicate.
 pub fn scan_all(target: &Path, scope: &ScanScope) -> Vec<Candidate> {
     let key = RandomState::new();
-    let mut all = builtin_scan(target, &key);
+    let mut all = builtin_scan(target, scope, &key);
     if let Some(mut gl) = try_gitleaks(target, scope, &key) {
         all.append(&mut gl);
     }
@@ -752,7 +828,7 @@ mod tests {
         )
         .unwrap();
         let key = RandomState::new();
-        let raw = builtin_scan(&dir, &key);
+        let raw = builtin_scan(&dir, &ScanScope::Filesystem, &key);
         assert_eq!(raw.len(), 2, "expected both rules to match: {raw:?}");
         let deduped = dedup_by_fingerprint(raw);
         assert_eq!(
@@ -913,7 +989,7 @@ mod tests {
         content.push_str("\naws_key = \"AKIAABCDEFGHIJKLMNOP\"\n");
         std::fs::write(dir.join("huge.txt"), &content).unwrap();
         let key = RandomState::new();
-        let out = builtin_scan(&dir, &key);
+        let out = builtin_scan(&dir, &ScanScope::Filesystem, &key);
         assert!(
             out.is_empty(),
             "file over the size cap must be skipped: {out:?}"
@@ -927,7 +1003,7 @@ mod tests {
     fn builtin_scan_handles_empty_target_dir() {
         let dir = unique_test_dir("empty_dir");
         let key = RandomState::new();
-        let out = builtin_scan(&dir, &key);
+        let out = builtin_scan(&dir, &ScanScope::Filesystem, &key);
         assert!(out.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -937,7 +1013,7 @@ mod tests {
         let dir = unique_test_dir("empty_file");
         std::fs::write(dir.join("empty.txt"), "").unwrap();
         let key = RandomState::new();
-        let out = builtin_scan(&dir, &key);
+        let out = builtin_scan(&dir, &ScanScope::Filesystem, &key);
         assert!(out.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -948,7 +1024,7 @@ mod tests {
         // 0xFF is never valid as a UTF-8 lead byte.
         std::fs::write(dir.join("bad.bin"), [b'a', b'=', 0xFF, 0xFE, b'"']).unwrap();
         let key = RandomState::new();
-        let out = builtin_scan(&dir, &key); // must not panic
+        let out = builtin_scan(&dir, &ScanScope::Filesystem, &key); // must not panic
         assert!(out.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -967,7 +1043,7 @@ mod tests {
         )
         .unwrap();
         let key = RandomState::new();
-        let out = builtin_scan(&dir, &key); // must not stack-overflow or hang
+        let out = builtin_scan(&dir, &ScanScope::Filesystem, &key); // must not stack-overflow or hang
         assert_eq!(out.len(), 1);
         assert!(!out[0].context_line.contains("AKIAABCDEFGHIJKLMNOP"));
         std::fs::remove_dir_all(&dir).ok();
@@ -981,7 +1057,7 @@ mod tests {
         std::fs::write(dir.join("a.env"), "aws_key = \"AKIA\"\n").unwrap();
         std::fs::write(dir.join("b.env"), "aws_key = \"ABCDEFGHIJKLMNOP\"\n").unwrap();
         let key = RandomState::new();
-        let out = builtin_scan(&dir, &key);
+        let out = builtin_scan(&dir, &ScanScope::Filesystem, &key);
         // Neither half alone matches the aws_access_key_id rule (needs `AKIA` + 16 chars
         // in one token); the generic fallback needs >=20 chars in one quoted value, and
         // neither half reaches that either, so this must find nothing — not a merged hit.
@@ -1006,7 +1082,7 @@ mod tests {
         )
         .unwrap();
         let key = RandomState::new();
-        let out = builtin_scan(&dir, &key);
+        let out = builtin_scan(&dir, &ScanScope::Filesystem, &key);
         assert!(
             out.is_empty(),
             "line-wrapped secret unexpectedly matched: {out:?}"
@@ -1027,7 +1103,7 @@ mod tests {
         symlink(&real_outside, dir.join("link.env")).unwrap();
 
         let key = RandomState::new();
-        let out = builtin_scan(&dir, &key);
+        let out = builtin_scan(&dir, &ScanScope::Filesystem, &key);
         // `real.env` (an actual file) is found; `link.env` (a symlink) is not followed —
         // WalkDir's default (no follow_links) reports symlinks via symlink_metadata, so
         // `file_type().is_file()` is false for them and builtin_scan's own filter skips
@@ -1056,8 +1132,71 @@ mod tests {
         let key = RandomState::new();
         // Must terminate (WalkDir's default is not to follow directory symlinks) rather
         // than recursing forever.
-        let out = builtin_scan(&dir, &key);
+        let out = builtin_scan(&dir, &ScanScope::Filesystem, &key);
         assert_eq!(out.len(), 1, "{out:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- issue #20: builtin_scan ignored ScanScope, so --staged still scanned everything ---
+
+    #[test]
+    fn builtin_scan_staged_scope_only_scans_staged_files() {
+        // Before the fix, builtin_scan() took no `scope` parameter at all and always walked
+        // the whole target tree, so a secret sitting in an unstaged file could still trip a
+        // BLOCK verdict under `--staged` — defeating "only check what I'm about to commit".
+        let dir = unique_test_dir("staged_scope");
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .expect("git must be on PATH for this test");
+            assert!(status.status.success(), "git {args:?} failed: {status:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+
+        std::fs::write(
+            dir.join("staged.env"),
+            "aws_key = \"AKIAABCDEFGHIJKLMNOP\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            // Deliberately not named e.g. "gh_token": that would also trip the generic
+            // high-entropy-assignment fallback rule (its keyword group matches "token"
+            // anywhere in the line), which would make this test's counts depend on issue
+            // #6's cross-rule dedup instead of the scope filtering being tested here.
+            dir.join("unstaged.env"),
+            "x_ghp = \"ghp_0123456789012345678901234567890123456\"\n",
+        )
+        .unwrap();
+        git(&["add", "staged.env"]);
+
+        let key = RandomState::new();
+        let staged_out = builtin_scan(&dir, &ScanScope::Staged, &key);
+        assert_eq!(
+            staged_out.len(),
+            1,
+            "expected only the staged secret to be reported: {staged_out:?}"
+        );
+        assert_eq!(staged_out[0].file, "staged.env");
+        assert_eq!(staged_out[0].rule_id, "aws_access_key_id");
+        assert!(
+            staged_out.iter().all(|c| c.file != "unstaged.env"),
+            "unstaged file's secret must not be reported under --staged: {staged_out:?}"
+        );
+
+        // Sanity check: Filesystem scope (the default) still sees both files, proving the
+        // difference above is scope-driven and not an unrelated regression.
+        let fs_out = builtin_scan(&dir, &ScanScope::Filesystem, &key);
+        assert_eq!(
+            fs_out.len(),
+            2,
+            "filesystem scope must still scan both files: {fs_out:?}"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }
