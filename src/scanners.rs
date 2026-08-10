@@ -920,4 +920,144 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // --- broader edge-case coverage --------------------------------------------------------
+
+    #[test]
+    fn builtin_scan_handles_empty_target_dir() {
+        let dir = unique_test_dir("empty_dir");
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key);
+        assert!(out.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn builtin_scan_handles_empty_file() {
+        let dir = unique_test_dir("empty_file");
+        std::fs::write(dir.join("empty.txt"), "").unwrap();
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key);
+        assert!(out.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn builtin_scan_ignores_non_utf8_file() {
+        let dir = unique_test_dir("bad_utf8");
+        // 0xFF is never valid as a UTF-8 lead byte.
+        std::fs::write(dir.join("bad.bin"), [b'a', b'=', 0xFF, 0xFE, b'"']).unwrap();
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key); // must not panic
+        assert!(out.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn builtin_scan_handles_very_deep_directory_tree() {
+        let dir = unique_test_dir("deep_tree");
+        let mut nested = dir.clone();
+        for i in 0..150 {
+            nested = nested.join(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("config.env"),
+            "aws_key = \"AKIAABCDEFGHIJKLMNOP\"\n",
+        )
+        .unwrap();
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key); // must not stack-overflow or hang
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].context_line.contains("AKIAABCDEFGHIJKLMNOP"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn builtin_scan_does_not_merge_secrets_split_across_two_files() {
+        // A secret's value split across two different files' content must be scanned
+        // independently — no cross-file concatenation.
+        let dir = unique_test_dir("two_files");
+        std::fs::write(dir.join("a.env"), "aws_key = \"AKIA\"\n").unwrap();
+        std::fs::write(dir.join("b.env"), "aws_key = \"ABCDEFGHIJKLMNOP\"\n").unwrap();
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key);
+        // Neither half alone matches the aws_access_key_id rule (needs `AKIA` + 16 chars
+        // in one token); the generic fallback needs >=20 chars in one quoted value, and
+        // neither half reaches that either, so this must find nothing — not a merged hit.
+        assert!(
+            out.is_empty(),
+            "must not synthesize a cross-file match: {out:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn builtin_scan_does_not_merge_secret_split_across_two_lines() {
+        // Characterization test: this scanner works line-by-line, so a single secret
+        // value wrapped across two lines is *not* detected as one token. Document that
+        // explicitly rather than leaving it as an unverified assumption — this is a
+        // detection-coverage limitation, not a masking leak (nothing unmasked is ever
+        // reported, because no candidate is produced from either half here).
+        let dir = unique_test_dir("split_line");
+        std::fs::write(
+            dir.join("wrapped.env"),
+            "aws_key = \"AKIAABCDEFGH\nIJKLMNOP\"\n",
+        )
+        .unwrap();
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key);
+        assert!(
+            out.is_empty(),
+            "line-wrapped secret unexpectedly matched: {out:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builtin_scan_does_not_follow_symlinked_files() {
+        use std::os::unix::fs::symlink;
+        let dir = unique_test_dir("symlink_file");
+        let real = dir.join("real_secret.env");
+        std::fs::write(&real, "aws_key = \"AKIAABCDEFGHIJKLMNOP\"\n").unwrap();
+        let outside = unique_test_dir("symlink_file_target_outside");
+        let real_outside = outside.join("real_secret.env");
+        std::fs::write(&real_outside, "aws_key = \"AKIAABCDEFGHIJKLMNOP\"\n").unwrap();
+        symlink(&real_outside, dir.join("link.env")).unwrap();
+
+        let key = RandomState::new();
+        let out = builtin_scan(&dir, &key);
+        // `real.env` (an actual file) is found; `link.env` (a symlink) is not followed —
+        // WalkDir's default (no follow_links) reports symlinks via symlink_metadata, so
+        // `file_type().is_file()` is false for them and builtin_scan's own filter skips
+        // them. This also means a symlink can never be used to read/leak content from
+        // outside the scan target.
+        assert_eq!(
+            out.len(),
+            1,
+            "expected only the real file to be scanned: {out:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builtin_scan_does_not_hang_on_symlink_loop() {
+        use std::os::unix::fs::symlink;
+        let dir = unique_test_dir("symlink_loop");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        // sub/loop -> dir (a directory symlink cycle back to an ancestor).
+        symlink(&dir, sub.join("loop")).unwrap();
+        std::fs::write(dir.join("real.env"), "aws_key = \"AKIAABCDEFGHIJKLMNOP\"\n").unwrap();
+
+        let key = RandomState::new();
+        // Must terminate (WalkDir's default is not to follow directory symlinks) rather
+        // than recursing forever.
+        let out = builtin_scan(&dir, &key);
+        assert_eq!(out.len(), 1, "{out:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
