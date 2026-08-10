@@ -291,20 +291,28 @@ Each finding must carry a `label` from the spec's allowed set — the default sp
 
 ## Real-world validation
 
-This repo has been reviewed and actually run against itself, not just described. Three rounds — two
-static code reviews, one real `claude -p --model haiku` execution against a live test fixture —
-found and closed **7/7 issues (#2–#8)** for **$0.7846** in real LLM spend. The headline finding
+This repo has been reviewed and actually run against itself, not just described. Four rounds — two
+static code reviews, one real `claude -p --model haiku` execution against a live test fixture, and
+a fourth "production hardening" round (adversarial re-audit + edge-case test expansion + a
+`v0.1.0` release + a second real execution) — found and closed **9/9 issues (#2–#8, #15, #16)**
+for **$2.7627** in real LLM spend, backed by a **24-test** regression suite. The headline finding
 isn't a style nit: `mask()` was fed the whole regex match instead of the secret capture group for
 `generic_high_entropy_assignment`, so the tail of a real secret leaked into `masked_preview` and
 `context_line` in plaintext — a direct violation of this tool's own core safety guarantee. Fixed in
-`73d2231`. Full methodology, every issue, and what was actually checked (not assumed):
-[`evals/README.md`](evals/README.md).
+`73d2231`. Round 4 found the same class of bug again at a different layer — `mask_line_all()` could
+leave 19 of 20 characters of a secret in plaintext when two matches partially overlapped — and
+rewrote it to a byte-range-merge algorithm that's safe regardless of which rule(s) produced the
+overlapping matches. Tagged and released as
+[**`v0.1.0`**](https://github.com/Loop-Suite/Secretscan-Loop/releases/tag/v0.1.0). Full
+methodology, every issue, and what was actually checked (not assumed), including an honest writeup
+of a cost mistake in round 4: [`evals/README.md`](evals/README.md).
 
 | Round | What | Issues | Real cost |
 |---|---|---|---|
 | 1–2 — static review | Read scanner/masking/dedup/coverage logic against README + design spec | #2–#7 | $0 |
 | 3 — real CLI execution | `claude -p --model haiku` scan x2, describe x1 against a live fixture | #8 | $0.7846 |
-| **Total** | | **7/7 closed** | **$0.7846** |
+| 4 — production hardening | Adversarial re-audit + edge-case tests (10→24) + `CHANGELOG.md`/`v0.1.0` + real execution vs. a 6-fake-secret-type fixture | #15, #16 | $1.9781 |
+| **Total** | | **9/9 closed** | **$2.7627** |
 
 ---
 
