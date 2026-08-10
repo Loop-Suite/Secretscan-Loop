@@ -150,6 +150,11 @@ struct Rule {
     id: &'static str,
     re: &'static str,
     confidence: &'static str,
+    /// Which capture group holds the *actual secret value* (0 = the whole match).
+    /// Only `generic_high_entropy_assignment` wraps the secret in its own group — its
+    /// full match also includes the keyword/operator/quotes prefix, which must never be
+    /// treated as "the secret" for masking/length purposes (see `builtin_scan`).
+    secret_group: usize,
 }
 
 /// Known-prefix rules first (high confidence, low false-positive), then a generic
@@ -160,56 +165,71 @@ fn rules() -> Vec<Rule> {
             id: "aws_access_key_id",
             re: r"AKIA[0-9A-Z]{16}",
             confidence: "high",
+            secret_group: 0,
         },
         Rule {
             id: "github_token",
             re: r"gh[pousr]_[A-Za-z0-9]{36,255}",
             confidence: "high",
+            secret_group: 0,
         },
         Rule {
             id: "anthropic_api_key",
             re: r"sk-ant-[A-Za-z0-9_-]{20,}",
             confidence: "high",
+            secret_group: 0,
         },
         Rule {
             id: "openai_api_key",
             re: r"sk-[A-Za-z0-9]{20,}(?:T3BlbkFJ[A-Za-z0-9]{20,})?",
             confidence: "high",
+            secret_group: 0,
         },
         Rule {
             id: "slack_token",
             re: r"xox[baprs]-[A-Za-z0-9-]{10,}",
             confidence: "high",
+            secret_group: 0,
         },
         Rule {
             id: "google_api_key",
             re: r"AIza[0-9A-Za-z_-]{35}",
             confidence: "high",
+            secret_group: 0,
         },
         Rule {
             id: "stripe_key",
+            // Note: `(live|test)` is a capture group but it is NOT the secret — the secret
+            // is the whole match, so this stays secret_group: 0 (see doc on Rule::secret_group).
             re: r"[sp]k_(live|test)_[A-Za-z0-9]{16,}",
             confidence: "high",
+            secret_group: 0,
         },
         Rule {
             id: "tavily_api_key",
             re: r"tvly-[A-Za-z0-9_-]{20,}",
             confidence: "high",
+            secret_group: 0,
         },
         Rule {
             id: "private_key_block",
             re: r"-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----",
             confidence: "high",
+            secret_group: 0,
         },
         Rule {
             id: "slack_webhook",
             re: r"https://hooks\.slack\.com/services/[A-Za-z0-9/]+",
             confidence: "medium",
+            secret_group: 0,
         },
         Rule {
             id: "generic_high_entropy_assignment",
             re: r#"(?i)(api[_-]?key|secret|token|password|passwd|access[_-]?key)\s*[:=]\s*['"]([A-Za-z0-9_\-/+=]{20,})['"]"#,
             confidence: "low",
+            // Group 2 is the quoted value itself — group 0 (whole match) also drags in the
+            // keyword, operator and quotes, which must never be fed to mask()/fingerprint().
+            secret_group: 2,
         },
     ]
 }
@@ -275,8 +295,14 @@ pub fn builtin_scan(target: &Path, key: &RandomState) -> Vec<Candidate> {
             // producing a Candidate (issue #4).
             let mut line_matches: Vec<(&Rule, &str)> = Vec::new();
             for (re, rule) in &compiled {
-                for m in re.find_iter(line) {
-                    line_matches.push((rule, m.as_str()));
+                for cap in re.captures_iter(line) {
+                    // Use the rule's designated secret group, not the whole match — for
+                    // generic_high_entropy_assignment the whole match also contains the
+                    // keyword/operator/quotes, which must never be treated as "the secret"
+                    // (see Rule::secret_group doc).
+                    if let Some(m) = cap.get(rule.secret_group).or_else(|| cap.get(0)) {
+                        line_matches.push((rule, m.as_str()));
+                    }
                 }
             }
             if line_matches.is_empty() {
