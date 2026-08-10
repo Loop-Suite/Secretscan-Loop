@@ -83,19 +83,58 @@ fn mask(raw: &str) -> String {
     )
 }
 
-/// Mask every occurrence of every raw value in `raws` inside `line`. Longest values are
-/// replaced first so a shorter raw value that happens to be a substring of a longer one
-/// (e.g. two secrets sharing a common prefix) can't leave a partial fragment unmasked.
+/// Mask every occurrence of every raw value in `raws` inside `line`.
+///
+/// This works on byte *ranges*, not string content: find every occurrence of every raw
+/// value in the original `line`, merge overlapping/adjacent ranges, then rebuild the line
+/// in one left-to-right pass, masking each merged range as a block. Range-based merging is
+/// required (issue #15) — an earlier content-based approach (sort raws longest-first, then
+/// repeatedly `contains`/`replace` each one against a mutating `result` string) could leave
+/// a secret almost entirely unmasked whenever two raw values *partially* overlapped without
+/// either containing the other: masking the longer one first consumes the characters it
+/// shares with the shorter one, so the shorter one's exact text no longer appears in
+/// `result` and its `.contains()` check silently fails, skipping its `.replace()` entirely.
+/// Working on ranges instead means every character covered by *any* match is always masked,
+/// regardless of how many secrets overlap or how.
 fn mask_line_all(line: &str, raws: &[&str]) -> String {
-    let mut sorted: Vec<&str> = raws.iter().copied().filter(|s| !s.is_empty()).collect();
-    sorted.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    sorted.dedup();
-    let mut result = line.to_string();
-    for raw in sorted {
-        if result.contains(raw) {
-            result = result.replace(raw, &mask(raw));
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for raw in raws.iter().filter(|s| !s.is_empty()) {
+        let mut cursor = 0usize;
+        while let Some(pos) = line[cursor..].find(raw) {
+            let start = cursor + pos;
+            let end = start + raw.len();
+            ranges.push((start, end));
+            // Advance by one *character* (not one byte) past `start` so overlapping
+            // self-matches are still caught, without landing mid-character on multi-byte
+            // UTF-8 input (`line[cursor..]` below would panic on a non-boundary index).
+            let step = line[start..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
+            cursor = start + step;
         }
     }
+    if ranges.is_empty() {
+        return line.to_string();
+    }
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+
+    let mut result = String::with_capacity(line.len());
+    let mut cursor = 0usize;
+    for (start, end) in merged {
+        result.push_str(&line[cursor..start]);
+        result.push_str(&mask(&line[start..end]));
+        cursor = end;
+    }
+    result.push_str(&line[cursor..]);
     result
 }
 
@@ -762,5 +801,79 @@ mod tests {
                 "n={n}: revealed {revealed}/{n} exceeds the 40% ceiling ({masked})"
             );
         }
+    }
+
+    // --- issue #15: partial-overlap masking leak ---------------------------------------
+
+    #[test]
+    fn mask_line_all_does_not_leak_on_partial_overlap() {
+        // Two "secrets" whose spans partially overlap without either containing the
+        // other. Before the fix, masking the longer one first consumed the characters it
+        // shares with the shorter one, so the shorter one's `.contains()` check silently
+        // failed and its (mostly non-overlapping) text was left in plaintext.
+        let line = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let raw1 = &line[0..20]; // "0123456789ABCDEFGHIJ"
+        let raw2 = &line[15..36]; // "FGHIJKLMNOPQRSTUVWXYZ" — overlaps raw1 at [15,20)
+        let masked = mask_line_all(line, &[raw1, raw2]);
+        assert!(
+            !masked.contains("0123456789ABCDE"),
+            "raw1's non-overlapping prefix must not survive: {masked}"
+        );
+        assert!(!masked.contains(raw1), "{masked}");
+        assert!(!masked.contains(raw2), "{masked}");
+    }
+
+    #[test]
+    fn mask_line_all_handles_three_way_chained_overlap() {
+        // A chain of three pairwise-overlapping-but-not-nested secrets (A overlaps B,
+        // B overlaps C, A and C don't touch) must all end up merged into one masked run
+        // with nothing left unmasked.
+        let line = "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD"; // 40 chars, 10 each
+        let a = &line[0..15]; // "AAAAAAAAAABBBBB"  (10 A's + 5 B's)
+        let b = &line[10..25]; // "BBBBBBBBBBCCCCC" (10 B's + 5 C's)
+        let c = &line[20..35]; // "CCCCCCCCCCDDDDD" (10 C's + 5 D's)
+        let masked = mask_line_all(line, &[a, b, c]);
+        assert!(!masked.contains(a) && !masked.contains(b) && !masked.contains(c));
+        // The untouched tail (last 5 'D's, positions 35..40) must remain visible —
+        // proves the fix doesn't over-mask the whole line, only the covered ranges.
+        assert!(masked.ends_with("DDDDD"), "{masked}");
+    }
+
+    #[test]
+    fn mask_handles_unicode_secret_without_panicking_or_leaking() {
+        // Multi-byte UTF-8 (Korean + emoji) must not panic on char-boundary slicing and
+        // must never reveal the value whole.
+        let raw = "비밀번호값입니다🔥emoji-mixed-secret-value-1234567890";
+        let masked = mask(raw);
+        assert!(!masked.contains(raw));
+        let line = format!("token = \"{raw}\"");
+        let masked_line = mask_line_all(&line, &[raw]);
+        assert!(!masked_line.contains(raw), "{masked_line}");
+    }
+
+    #[test]
+    fn mask_fully_masks_very_short_secrets() {
+        for raw in ["", "a", "ab", "1234567", "12345678"] {
+            let masked = mask(raw);
+            if !raw.is_empty() {
+                assert!(!masked.contains(raw), "raw={raw:?} masked={masked}");
+            }
+            assert!(masked.chars().all(|c| c == '*'), "masked={masked}");
+        }
+    }
+
+    #[test]
+    fn mask_handles_very_long_secret_without_panicking() {
+        let raw: String = (0..200_000)
+            .map(|i| (b'a' + (i % 26) as u8) as char)
+            .collect();
+        let masked = mask(&raw);
+        assert!(!masked.contains(&raw));
+        // clamp(1, 6) caps reveal at 6 head + 6 tail regardless of length.
+        assert!(
+            masked.starts_with(&raw[..6]),
+            "{}",
+            &masked[..20.min(masked.len())]
+        );
     }
 }
