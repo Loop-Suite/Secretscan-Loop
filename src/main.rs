@@ -386,7 +386,7 @@ fn run_scan(
 
     let lens_outputs: Vec<(String, lens::LensOutput)> =
         par_map(concurrency, selected_ids.clone(), |id| {
-            let out = lens::review_lens(llm, &sp, &inp, &id)?;
+            let out = lens::review_lens(llm, &sp, &inp, &id, round)?;
             println!(
                 "  lens done: {} — {} finding(s), {} unverified",
                 id,

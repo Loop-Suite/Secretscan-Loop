@@ -129,7 +129,13 @@ fn build_review_task(spec: &Spec, lens_title: &str, lens_guide: &str) -> String 
     )
 }
 
-pub fn review_lens(llm: &Llm, spec: &Spec, input: &Input, lens_id: &str) -> Result<LensOutput> {
+pub fn review_lens(
+    llm: &Llm,
+    spec: &Spec,
+    input: &Input,
+    lens_id: &str,
+    round: usize,
+) -> Result<LensOutput> {
     let lens = spec
         .lens_by_id(lens_id)
         .ok_or_else(|| anyhow::anyhow!("lens not in spec: {lens_id}"))?;
@@ -147,7 +153,12 @@ pub fn review_lens(llm: &Llm, spec: &Spec, input: &Input, lens_id: &str) -> Resu
         lens.persona_name.clone()
     };
     for (i, f) in out.findings.iter_mut().enumerate() {
-        f.id = format!("{}-{}", lens_id, i + 1);
+        // Round is embedded so ids stay unique across separate `--prior` runs (see
+        // discourse::run's "surface-r{round}-{i}" ids for the same convention) — without it,
+        // a prior-round finding carried forward in main.rs could collide with an unrelated
+        // finding produced by this same lens in the current round and silently overwrite its
+        // resolution.
+        f.id = format!("{}-r{}-{}", lens_id, round, i + 1);
         f.lens = lens_id.to_string();
         f.reviewer = reviewer.clone();
         // Never trust the LLM's own claim about verification status — derive strictly from
